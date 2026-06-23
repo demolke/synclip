@@ -42,7 +42,7 @@ def test_default_view_applies_head_pose_axes():
 def test_config_roundtrip():
     cfg = ViewConfig(label="Out", mesh_path="/x/head.glb", is_output=True, source="ai")
     cfg.modifiers = [
-        ModifierConfig("ai", influence=0.75, params={"scope": "mouth", "stream": "ai"}),
+        ModifierConfig("input", influence=0.75, params={"stream": "ai", "scope": "mouth"}),
         ModifierConfig("smooth", influence=0.4),
         ModifierConfig("pose_filter", params={"rot": [True, False, True],
                                               "pos": [True, True, True],
@@ -67,8 +67,8 @@ def test_ai_modifier_replaces_scoped_channels():
 
 def test_ai_modifier_influence_blends():
     cfg = ViewConfig(label="AI")
-    cfg.modifiers = [_inp(), ModifierConfig("ai", influence=0.5,
-                                    params={"scope": ai_blendshapes.SCOPE_ALL, "stream": "ai"})]
+    cfg.modifiers = [_inp(), ModifierConfig("input", influence=0.5,
+                                    params={"stream": "ai", "scope": ai_blendshapes.SCOPE_ALL})]
     pipe = ViewPipeline(cfg)
     out, _ = pipe.process(_streams([0.0] * 52, ai=[1.0] * 52))
     assert abs(out[_IDX["jawOpen"]] - 0.5) < 1e-6
@@ -76,8 +76,8 @@ def test_ai_modifier_influence_blends():
 
 def test_ai_modifier_noop_without_ai_stream():
     cfg = ViewConfig(label="AI")
-    cfg.modifiers = [_inp(), ModifierConfig("ai", influence=1.0,
-                                    params={"scope": ai_blendshapes.SCOPE_ALL, "stream": "ai"})]
+    cfg.modifiers = [_inp(), ModifierConfig("input", influence=1.0,
+                                    params={"stream": "ai", "scope": ai_blendshapes.SCOPE_ALL})]
     pipe = ViewPipeline(cfg)
     out, _ = pipe.process(_streams([0.2] * 52, ai=None))
     assert out == [0.2] * 52
@@ -122,8 +122,8 @@ def test_no_modifiers_outputs_zeros():
 
 def test_disabled_modifier_is_skipped():
     cfg = ViewConfig(label="x")
-    cfg.modifiers = [_inp(), ModifierConfig("ai", enabled=False, influence=1.0,
-                                    params={"scope": "all", "stream": "ai"})]
+    cfg.modifiers = [_inp(), ModifierConfig("input", enabled=False, influence=1.0,
+                                    params={"stream": "ai", "scope": "all"})]
     pipe = ViewPipeline(cfg)
     out, _ = pipe.process(_streams([0.2] * 52, ai=[0.9] * 52))
     assert out == [0.2] * 52
@@ -135,8 +135,8 @@ def test_modifier_order_matters_and_apply_config_rebuilds():
     out, _ = pipe.process(_streams([0.4] * 52))
     assert out == [0.4] * 52
     cfg = ViewConfig(label="v")
-    cfg.modifiers = [_inp(), ModifierConfig("ai", influence=1.0,
-                                    params={"scope": "all", "stream": "ai"})]
+    cfg.modifiers = [_inp(), ModifierConfig("input", influence=1.0,
+                                    params={"stream": "ai", "scope": "all"})]
     pipe.apply_config(cfg)
     out, _ = pipe.process(_streams([0.4] * 52, ai=[0.1] * 52))
     assert abs(out[_IDX["jawOpen"]] - 0.1) < 1e-6

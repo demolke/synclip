@@ -5,3 +5,7 @@ __pycache__/
 .godot
 *.import
 *.uid
+venv/
+
+# Mediapipe model assets fetched at runtime
+*.task

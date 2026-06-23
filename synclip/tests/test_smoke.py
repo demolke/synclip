@@ -528,8 +528,8 @@ def test_ai_modifier_replace_all_uses_ai(qapp, tmp_path):
             {"audio_position_ms": 0.0, "blendshapes": [0.9] * 52},
             {"audio_position_ms": 1000.0, "blendshapes": [0.9] * 52},
         ])
-        _set_output_modifiers(w, [ModifierConfig("ai", influence=1.0,
-                                  params={"scope": ai.SCOPE_ALL, "stream": "ai"})])
+        _set_output_modifiers(w, [ModifierConfig("input", influence=1.0,
+                                  params={"stream": "ai", "scope": ai.SCOPE_ALL})])
         vals = w._review_blendshapes(500.0)
         jaw = BLENDSHAPE_NAMES.index("jawOpen")
         neutral = BLENDSHAPE_NAMES.index("_neutral")
@@ -550,8 +550,8 @@ def test_ai_modifier_mix_influence(qapp, tmp_path):
             {"audio_position_ms": 0.0, "blendshapes": [1.0] * 52},
             {"audio_position_ms": 1000.0, "blendshapes": [1.0] * 52},
         ])
-        _set_output_modifiers(w, [ModifierConfig("ai", influence=0.25,
-                                  params={"scope": ai.SCOPE_MOUTH, "stream": "ai"})])
+        _set_output_modifiers(w, [ModifierConfig("input", influence=0.25,
+                                  params={"stream": "ai", "scope": ai.SCOPE_MOUTH})])
         jaw = BLENDSHAPE_NAMES.index("jawOpen")
         brow = BLENDSHAPE_NAMES.index("browInnerUp")
         vals = w._review_blendshapes(500.0)
@@ -596,7 +596,7 @@ def test_editing_modifier_broadcasts_a_frame(qapp, tmp_path, monkeypatch):
                             lambda *a, **k: sent.append((a, k)))
         w._on_view_selected(OUTPUT_VIEW)
         w._views[OUTPUT_VIEW].modifiers = [
-            ModifierConfig("ai", influence=1.0, params={"scope": ai.SCOPE_ALL, "stream": "ai"})
+            ModifierConfig("input", influence=1.0, params={"stream": "ai", "scope": ai.SCOPE_ALL})
         ]
         w._on_modifier_stack_changed()    # add the AI modifier -> broadcasts
         w._on_modifier_stack_changed()    # nudge again -> broadcasts again

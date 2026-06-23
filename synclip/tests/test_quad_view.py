@@ -85,7 +85,7 @@ def test_per_view_modifiers_are_independent(qapp, tmp_path):
     try:
         # Output view replaces-all with AI; raw view stays clean.
         w._views[OUTPUT_VIEW].modifiers = [
-            ModifierConfig("ai", influence=1.0, params={"scope": ai.SCOPE_ALL, "stream": "ai"})
+            ModifierConfig("input", influence=1.0, params={"stream": "ai", "scope": ai.SCOPE_ALL})
         ]
         w._pipelines[OUTPUT_VIEW].apply_config(w._views[OUTPUT_VIEW])
         # Same raw + ai inputs -> different per-view results.

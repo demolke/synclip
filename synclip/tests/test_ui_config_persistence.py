@@ -93,12 +93,12 @@ def test_save_ui_config_writes_ai_modifier_scope(qapp, tmp_path):
     try:
         w._on_view_selected(OUTPUT_VIEW)
         w._views[OUTPUT_VIEW].modifiers = [
-            ModifierConfig("ai", influence=0.5, params={"scope": ai.SCOPE_MOUTH, "stream": "ai"})
+            ModifierConfig("input", influence=0.5, params={"stream": "ai", "scope": ai.SCOPE_MOUTH})
         ]
         w._save_ui_config()
         data = cfg.load(str(tmp_path))
         mods = data["views"][OUTPUT_VIEW]["modifiers"]
-        assert mods[0]["type"] == "ai"
+        assert mods[0]["type"] == "input"
         assert mods[0]["params"]["scope"] == ai.SCOPE_MOUTH
     finally:
         w._worker.stop()
@@ -167,7 +167,7 @@ def test_restore_ui_config_ai_modifier_scope(qapp, tmp_path):
     w1 = _make_window(tmp_path)
     try:
         w1._views[OUTPUT_VIEW].modifiers = [
-            ModifierConfig("ai", influence=1.0, params={"scope": ai.SCOPE_ALL, "stream": "ai"})
+            ModifierConfig("input", influence=1.0, params={"stream": "ai", "scope": ai.SCOPE_ALL})
         ]
         w1._save_ui_config()
     finally:
@@ -176,7 +176,7 @@ def test_restore_ui_config_ai_modifier_scope(qapp, tmp_path):
     w2 = _make_window(tmp_path)
     try:
         mods = w2._views[OUTPUT_VIEW].modifiers
-        assert mods[0].type == "ai"
+        assert mods[0].type == "input"
         assert mods[0].params["scope"] == ai.SCOPE_ALL
     finally:
         w2._worker.stop()
