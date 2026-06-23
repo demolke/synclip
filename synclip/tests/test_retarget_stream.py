@@ -19,7 +19,7 @@ from ..data import Stream
 from ..arkit_names import BLENDSHAPE_NAMES
 
 _GLB = os.path.join(
-    os.path.dirname(__file__), "..", "..", "godot", "head.glb"
+    os.path.dirname(__file__), "..", "..", "godot", "data", "head.glb"
 )
 _HAS_GLB = os.path.isfile(_GLB)
 

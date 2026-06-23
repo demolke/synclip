@@ -8,11 +8,7 @@ from dataclasses import dataclass, field
 
 from . import modifiers as mod_mod
 from .modifiers import ModifierConfig, ModifierContext
-from . import ai_blendshapes
 from .data import Stream
-
-_IDENTITY_CURVE: list[list[float]] = [[0.0, 0.0], [1.0, 1.0]]
-_POSE_AXIS_KEYS = ("rot_x", "rot_y", "rot_z", "pos_x", "pos_y", "pos_z")
 
 
 def _default_modifiers() -> list[ModifierConfig]:
@@ -21,46 +17,6 @@ def _default_modifiers() -> list[ModifierConfig]:
         mod_mod.InputModifier.default_config(),
         mod_mod.PoseFilterModifier.default_config(),
     ]
-
-
-def _migrate_legacy_modifiers(d: dict) -> list[ModifierConfig]:
-    """Build a modifier stack from the old flat per-view config keys.
-
-    Older projects stored the mix as standalone settings (``ai_scope``,
-    ``smoothing``, ``closure_*``, ``pose_axes`` ...). We rebuild the equivalent
-    stack: a base ``input`` reading MediaPipe, an ``input`` overlaying the AI
-    stream (the modern replacement for the retired "ai" modifier), then the
-    optional smooth/closure stages, and finally the head-pose filter.
-    """
-    mods: list[ModifierConfig] = [
-        ModifierConfig("input", influence=1.0,
-                       params={"stream": "mediapipe", "scope": ai_blendshapes.SCOPE_ALL}),
-    ]
-
-    ai_scope = d.get("ai_scope", ai_blendshapes.SCOPE_NONE)
-    if ai_scope != ai_blendshapes.SCOPE_NONE:
-        mods.append(ModifierConfig(
-            "input", influence=float(d.get("ai_influence", 1.0)),
-            params={"stream": "ai", "scope": ai_scope},
-        ))
-
-    smoothing = float(d.get("smoothing", 0.0))
-    if smoothing > 0.0:
-        mods.append(ModifierConfig("smooth", influence=smoothing))
-
-    if d.get("closure_enabled"):
-        mods.append(ModifierConfig(
-            "closure", influence=float(d.get("closure_amount", 1.0))))
-
-    axes = d.get("pose_axes", {})
-    mods.append(ModifierConfig("pose_filter", params={
-        "rot": [bool(axes.get("rot_x", True)), bool(axes.get("rot_y", True)),
-                bool(axes.get("rot_z", True))],
-        "pos": [bool(axes.get("pos_x", True)), bool(axes.get("pos_y", True)),
-                bool(axes.get("pos_z", True))],
-        "neck_anchor": float(d.get("neck_anchor", 0.0)),
-    }))
-    return mods
 
 
 @dataclass
@@ -84,13 +40,6 @@ class ViewConfig:
             "camera": dict(self.camera),
         }
 
-    # Old per-view config stored its mix settings as flat keys instead of a
-    # modifier stack. These mark such a dict so we can migrate it on load.
-    _LEGACY_KEYS = (
-        "smoothing", "ai_scope", "ai_mode", "ai_influence",
-        "closure_enabled", "closure_amount", "pose_axes", "neck_anchor",
-    )
-
     @classmethod
     def from_dict(cls, d: dict) -> "ViewConfig":
         cfg = cls(label=d.get("label", "View"))
@@ -99,8 +48,6 @@ class ViewConfig:
         cfg.source = d.get("source", "mediapipe")
         if "modifiers" in d:
             cfg.modifiers = [ModifierConfig.from_dict(m) for m in d["modifiers"]]
-        elif any(k in d for k in cls._LEGACY_KEYS):
-            cfg.modifiers = _migrate_legacy_modifiers(d)
         cam = d.get("camera", {})
         cfg.camera = {
             "yaw": float(cam.get("yaw", 0.0)),

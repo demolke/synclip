@@ -2,8 +2,8 @@
 Per-view pipeline tests (view_pipeline + modifiers).
 
 Each preview view starts from a named *source* stream and runs an ordered stack
-of modifiers over it.  These cover config serialisation, legacy migration, and
-that the runtime pipeline honours each modifier without a Qt or GL context.
+of modifiers over it.  These cover config serialisation and that the runtime
+pipeline honours each modifier without a Qt or GL context.
 """
 
 from __future__ import annotations
@@ -140,31 +140,6 @@ def test_modifier_order_matters_and_apply_config_rebuilds():
     pipe.apply_config(cfg)
     out, _ = pipe.process(_streams([0.4] * 52, ai=[0.1] * 52))
     assert abs(out[_IDX["jawOpen"]] - 0.1) < 1e-6
-
-
-def test_legacy_config_migrates_to_modifiers():
-    legacy = {
-        "label": "Out",
-        "smoothing": 0.4,
-        "ai_scope": ai_blendshapes.SCOPE_MOUTH,
-        "ai_mode": ai_blendshapes.MODE_MIX,
-        "ai_influence": 0.6,
-        "closure_enabled": True,
-        "closure_amount": 0.8,
-        "pose_axes": {"rot_x": False, "rot_y": True, "rot_z": True,
-                      "pos_x": True, "pos_y": True, "pos_z": True},
-        "neck_anchor": 0.3,
-    }
-    cfg = ViewConfig.from_dict(legacy)
-    types = [m.type for m in cfg.modifiers]
-    assert types == ["input", "input", "smooth", "closure", "pose_filter"]
-    ai = cfg.modifiers[1]
-    assert ai.influence == 0.6 and ai.params["scope"] == ai_blendshapes.SCOPE_MOUTH
-    smooth = cfg.modifiers[2]
-    assert smooth.influence == 0.4
-    pose = cfg.modifiers[-1]
-    assert pose.params["rot"] == [False, True, True]
-    assert pose.params["neck_anchor"] == 0.3
 
 
 def test_closure_modifier_prepare_detects_events():

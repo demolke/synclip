@@ -23,7 +23,7 @@ from .. import head_mesh
 from ..arkit_names import BLENDSHAPE_NAMES
 from ..offscreen_renderer import SoftwareRenderer, _BG
 
-_GLB = os.path.join(os.path.dirname(__file__), "..", "..", "godot", "head.glb")
+_GLB = os.path.join(os.path.dirname(__file__), "..", "..", "godot", "data", "head.glb")
 _HAS_GLB = os.path.isfile(_GLB)
 _HAS_MEDIAPIPE = importlib.util.find_spec("mediapipe") is not None
 

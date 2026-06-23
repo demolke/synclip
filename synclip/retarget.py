@@ -247,7 +247,8 @@ def retarget_stream(
 
     if use_pool:
         cfg_dict = cfg.to_dict()
-        with _mp.Pool(
+        ctx = _mp.get_context("spawn")
+        with ctx.Pool(
             processes=n_workers,
             initializer=_mp_init,
             initargs=(mesh, width, height, cfg_dict, mask),

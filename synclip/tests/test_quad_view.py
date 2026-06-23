@@ -345,7 +345,7 @@ def test_export_glb_produces_valid_file(tmp_path):
 
     # Find head.glb
     here = os.path.dirname(__file__)
-    glb_path = os.path.normpath(os.path.join(here, "../../godot/head.glb"))
+    glb_path = os.path.normpath(os.path.join(here, "../../godot/data/head.glb"))
     if not os.path.isfile(glb_path):
         import pytest; pytest.skip("head.glb not found")
 

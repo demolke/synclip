@@ -93,7 +93,7 @@ def _default_head_mesh() -> str | None:
     if env and os.path.isfile(env):
         return env
     here = os.path.dirname(os.path.abspath(__file__))
-    cand = os.path.normpath(os.path.join(here, "..", "..", "godot", "head.glb"))
+    cand = os.path.normpath(os.path.join(here, "..", "..", "godot", "data", "head.glb"))
     return cand if os.path.isfile(cand) else None
 
 
