@@ -17,6 +17,31 @@ def clamp01(v: float) -> float:
     return 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
 
 
+def sample_curve(points: list, t: float) -> float:
+    """Piecewise-linear sample of *points* at x=*t*, returning the raw y.
+
+    Unlike :func:`build_lut`, this does NOT assume monotonicity and does NOT
+    clamp the output, so it suits a free-form animation curve (e.g. an influence
+    curve over the timeline). x outside the point range holds the nearest end.
+    """
+    if not points:
+        return 0.0
+    pts = sorted(points)
+    if t <= pts[0][0]:
+        return float(pts[0][1])
+    if t >= pts[-1][0]:
+        return float(pts[-1][1])
+    import bisect
+    xs = [p[0] for p in pts]
+    i = bisect.bisect_right(xs, t)
+    x0, y0 = pts[i - 1]
+    x1, y1 = pts[i]
+    if x1 == x0:
+        return float(y1)
+    a = (t - x0) / (x1 - x0)
+    return float(y0 + a * (y1 - y0))
+
+
 def build_lut(points: list[tuple[float, float]], n: int = LUT_SIZE) -> list[float]:
     """Bake *points* into an n-entry monotone-cubic LUT over x in [0, 1]."""
     pts = sorted(points)

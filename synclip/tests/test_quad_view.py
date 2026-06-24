@@ -247,7 +247,7 @@ def _seed_persisted_take(w):
     w._current_synclip = data
     take = data["takes"][0]
     w._current_take_id = take["take_id"]
-    w._streams.set("mediapipe", take["frames"])
+    w._streams.set("mediapipe", take["streams"]["mediapipe"])
 
 
 def test_editing_raw_updates_take_frame_in_memory(qapp, tmp_path, monkeypatch):
@@ -284,7 +284,7 @@ def test_editing_raw_persists_to_disk(qapp, tmp_path, monkeypatch):
         w._save_current_take()  # flush the debounce timer immediately
 
         data = ld.load_synclip(w._current_audio_path)
-        assert abs(data["takes"][0]["frames"][0]["blendshapes"][7] - 0.99) < 1e-6
+        assert abs(data["takes"][0]["streams"]["mediapipe"][0]["blendshapes"][7] - 0.99) < 1e-6
     finally:
         w._worker.stop()
 
@@ -475,3 +475,58 @@ def test_export_glb_minimal_synthetic(tmp_path):
     # chunk payload was deliberately unaligned.
     for bv in j["bufferViews"]:
         assert bv.get("byteOffset", 0) % 4 == 0
+
+
+def _build_two_mesh_glb(target_names):
+    """A GLB whose mesh 0 is a decoy with no morph targets and whose mesh 1 is
+    the morph mesh (primitive targets + targetNames)."""
+    import json, struct
+    n = len(target_names)
+    j = {
+        "asset": {"version": "2.0"},
+        "scenes": [{"nodes": [0, 1]}],
+        "nodes": [{"mesh": 0}, {"mesh": 1}],
+        "meshes": [
+            {"primitives": [{"attributes": {"POSITION": 0}}]},  # decoy, no targets
+            {"primitives": [{"attributes": {"POSITION": 0},
+                             "targets": [{"POSITION": 0}] * n}],
+             "extras": {"targetNames": list(target_names)}},
+        ],
+        "buffers": [{"byteLength": 0}],
+        "bufferViews": [],
+        "accessors": [],
+    }
+    json_bytes = json.dumps(j).encode()
+    json_bytes += b"\x20" * ((4 - len(json_bytes) % 4) % 4)
+    chunks = struct.pack("<II", len(json_bytes), 0x4E4F534A) + json_bytes
+    header = struct.pack("<III", 0x46546C67, 2, 12 + len(chunks))
+    return header + chunks
+
+
+def test_export_glb_targets_the_morph_mesh_not_mesh_zero(tmp_path):
+    """When the morph mesh isn't mesh 0, export must animate its node, not fail
+    on mesh 0's missing targetNames."""
+    from synclip.export_glb import export_glb, _read_glb
+    from synclip.arkit_names import BLENDSHAPE_NAMES
+
+    src = str(tmp_path / "two.glb")
+    with open(src, "wb") as fh:
+        fh.write(_build_two_mesh_glb(BLENDSHAPE_NAMES))
+    frames = [{"audio_position_ms": i * 100.0, "blendshapes": [0.0] * 52}
+              for i in range(3)]
+    out = str(tmp_path / "out.glb")
+    export_glb(src, frames, out)
+
+    j, _ = _read_glb(out)
+    # The animation must target node 1 (which references the morph mesh).
+    assert j["animations"][0]["channels"][0]["target"]["node"] == 1
+
+
+def test_export_glb_rejects_empty_frames(tmp_path):
+    from synclip.export_glb import export_glb
+    from synclip.arkit_names import BLENDSHAPE_NAMES
+    src = str(tmp_path / "src.glb")
+    with open(src, "wb") as fh:
+        fh.write(_build_minimal_glb(BLENDSHAPE_NAMES))
+    with pytest.raises(ValueError):
+        export_glb(src, [], str(tmp_path / "out.glb"))

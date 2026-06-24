@@ -6,6 +6,7 @@ __pycache__/
 *.import
 *.uid
 venv/
+synclip/utils/
 
 # Mediapipe model assets fetched at runtime
 *.task

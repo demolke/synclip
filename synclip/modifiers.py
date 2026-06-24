@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .blendshape_filter import _GAIN_CHANNELS, _WIDTH_CHANNELS, _sample_lut
-from .curve_lut import build_lut
+from .curve_lut import build_lut, sample_curve
 from . import ai_blendshapes
 from . import mouth_closure as closure_mod
 
@@ -45,6 +45,7 @@ class ParamSpec:
         "float"     -> slider (min..max)
         "bool"      -> checkbox
         "enum"      -> combo (choices = list of (value, label))
+        "stream"    -> combo of the currently-available track/stream names
         "curve"     -> CurveEditor (value is a list of [x, y] points)
         "vec3bool"  -> three checkboxes (value is [bool, bool, bool])
         "streamset" -> a checkbox per available stream (value is list[str])
@@ -67,6 +68,8 @@ class ParamSpec:
             return bool(value)
         if self.kind == "enum":
             return value
+        if self.kind == "stream":
+            return value
         if self.kind == "curve":
             return [list(p) for p in value]
         if self.kind == "vec3bool":
@@ -86,12 +89,23 @@ class ParamSpec:
 # Config + runtime context
 # ---------------------------------------------------------------------------
 
+def _default_influence_curve() -> list:
+    """Relative neutral: a flat offset of 0 over the whole clip (base unchanged)."""
+    return [[0.0, 0.0], [1.0, 0.0]]
+
+
 @dataclass
 class ModifierConfig:
     """Serialisable per-modifier settings."""
     type: str
     enabled: bool = True
     influence: float = 1.0
+    # Time-varying influence: "off" uses the scalar above; "relative" adds the
+    # curve (a signed offset, neutral 0) to the base; "absolute" lets the curve
+    # drive the influence directly. The curve is [[t, y], ...] with t normalised
+    # to the clip (0..1); the effective influence is always clamped to [0, 1].
+    influence_anim: str = "off"
+    influence_curve: list = field(default_factory=_default_influence_curve)
     params: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -99,6 +113,8 @@ class ModifierConfig:
             "type": self.type,
             "enabled": self.enabled,
             "influence": self.influence,
+            "influence_anim": self.influence_anim,
+            "influence_curve": [list(p) for p in self.influence_curve],
             "params": dict(self.params),
         }
 
@@ -108,6 +124,9 @@ class ModifierConfig:
             type=d["type"],
             enabled=bool(d.get("enabled", True)),
             influence=float(d.get("influence", 1.0)),
+            influence_anim=str(d.get("influence_anim", "off")),
+            influence_curve=[list(p) for p in
+                             d.get("influence_curve", _default_influence_curve())],
             params=dict(d.get("params", {})),
         )
 
@@ -117,6 +136,7 @@ class ModifierContext:
     """Per-sample context handed to every ``apply()`` call."""
     streams: dict[str, list[float] | None]   # current interpolated sample/stream
     pos_ms: float = 0.0
+    duration_ms: float = 0.0   # full clip length; 0 disables time-varying influence
 
     @staticmethod
     def blend(base: list[float], wet: list[float], influence: float) -> list[float]:
@@ -162,6 +182,23 @@ class Modifier:
     def influence(self) -> float:
         return self.config.influence
 
+    def effective_influence(self, ctx: "ModifierContext") -> float:
+        """The influence to apply at ``ctx.pos_ms``.
+
+        ``influence_anim == "off"`` (or no clip duration) -> the static value.
+        "relative" adds the offset curve to the base; "absolute" lets the curve
+        drive it. Always clamped to [0, 1] so the wet/dry blend stays in range.
+        """
+        cfg = self.config
+        anim = cfg.influence_anim
+        if anim == "off" or ctx.duration_ms <= 0.0:
+            return cfg.influence
+        t = ctx.pos_ms / ctx.duration_ms
+        t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+        y = sample_curve(cfg.influence_curve, t)
+        k = cfg.influence + y if anim == "relative" else y
+        return 0.0 if k < 0.0 else 1.0 if k > 1.0 else k
+
     # -- lifecycle ----------------------------------------------------------
 
     def reset(self) -> None:
@@ -185,7 +222,7 @@ class Modifier:
         if self.signal == "pose":
             return values, self.transform_pose(pose, ctx)
         wet = self.transform(values, ctx)
-        return ctx.blend(values, wet, self.influence), pose
+        return ctx.blend(values, wet, self.effective_influence(ctx)), pose
 
     def transform(self, values: list[float], ctx: ModifierContext) -> list[float]:
         """Return the fully-wet blendshapes; the base blends by influence."""
@@ -281,8 +318,9 @@ class SmoothModifier(Modifier):
         # ``v + influence*(prev - v)`` is exactly an EMA with weight=influence.
         prev = self._prev if self._prev is not None else values
         wet = list(prev)
-        # Remember the post-blend result for the next frame.
-        blended = ctx.blend(values, wet, self.influence)
+        # Remember the post-blend result for the next frame (same influence the
+        # base apply() will use for the output, so the EMA stays consistent).
+        blended = ctx.blend(values, wet, self.effective_influence(ctx))
         self._prev = blended
         return wet
 
@@ -333,7 +371,7 @@ class ClosureModifier(Modifier):
         if not self._events:
             return values, pose
         wet = closure_mod.enforce_closure(values, ctx.pos_ms, self._events, 1.0)
-        return ctx.blend(values, wet, self.influence), pose
+        return ctx.blend(values, wet, self.effective_influence(ctx)), pose
 
 
 @register
@@ -347,9 +385,9 @@ class InputModifier(Modifier):
     display_name = "Input stream"
     has_influence = True
     param_specs = [
-        ParamSpec("stream", "enum", "mediapipe", label="Stream",
-                  choices=[("mediapipe", "MediaPipe"), ("ai", "AI"),
-                           ("retarget", "Retarget")]),
+        # The available streams are discovered at runtime (the editor fills the
+        # combo from the live track list), so no backend names are hardcoded here.
+        ParamSpec("stream", "stream", "mediapipe", label="Stream"),
         ParamSpec("scope", "enum", ai_blendshapes.SCOPE_ALL, label="Scope",
                   choices=[(ai_blendshapes.SCOPE_ALL, "All channels"),
                            (ai_blendshapes.SCOPE_MOUTH, "Mouth only")]),
@@ -368,7 +406,7 @@ class InputModifier(Modifier):
 
     def apply(self, values, pose, ctx):
         wet = self.transform(values, ctx)
-        return ctx.blend(values, wet, self.influence), pose
+        return ctx.blend(values, wet, self.effective_influence(ctx)), pose
 
 
 @register

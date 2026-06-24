@@ -140,7 +140,7 @@ def test_scripted_process_run(qapp, tmp_path):
         doc = data_mod.load_synclip(audio_path)
         assert doc is not None
         assert len(doc["takes"]) == 1
-        assert len(doc["takes"][0]["frames"]) == n_frames
+        assert len(doc["takes"][0]["streams"]["mediapipe"]) == n_frames
 
         # The client saw a MODE_LIVE stream with monotonic non-decreasing pos.
         # Wait up to 1s for frames to arrive (Windows IPC can be slower).

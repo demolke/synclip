@@ -46,6 +46,25 @@ def _make_window(tmp_path):
 # Construction
 # ---------------------------------------------------------------------------
 
+def test_cli_host_port_defaults_and_overrides():
+    from synclip.main import build_parser
+    p = build_parser()
+    d = p.parse_args([])
+    assert d.host == "127.0.0.1" and d.port == 9876
+    o = p.parse_args(["--host", "0.0.0.0", "--port", "5005"])
+    assert o.host == "0.0.0.0" and o.port == 5005
+
+
+def test_main_window_binds_configured_ipc_host_port(qapp, tmp_path):
+    from synclip.ui.main_window import MainWindow
+    w = MainWindow(root_dir=str(tmp_path), ipc_host="127.0.0.1", ipc_port=0)
+    try:
+        assert w._ipc.host == "127.0.0.1"
+        assert w._ipc.port > 0   # 0 -> OS picked a real free port at bind
+    finally:
+        w.close()
+
+
 def test_main_window_constructs(qapp, tmp_path):
     w = _make_window(tmp_path)
     try:

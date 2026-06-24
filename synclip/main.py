@@ -54,7 +54,7 @@ def _list_cameras() -> None:
         print("  No cameras found.")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="SynClip capture tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -70,7 +70,24 @@ def main() -> None:
         action="store_true",
         help="List available camera indices and exit (no UI)",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host/interface the IPC server binds to for Godot/Blender clients "
+             "(default: 127.0.0.1; use 0.0.0.0 to accept remote connections)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=9876,
+        help="TCP port the IPC server listens on (default: 9876; 0 picks a free "
+             "port)",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     if args.list_cameras:
         _list_cameras()
@@ -93,7 +110,7 @@ def main() -> None:
 
     from .ui.main_window import MainWindow
 
-    window = MainWindow(root_dir=root_dir)
+    window = MainWindow(root_dir=root_dir, ipc_host=args.host, ipc_port=args.port)
     window.show()
 
     sys.exit(app.exec())

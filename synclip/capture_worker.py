@@ -112,6 +112,12 @@ class CaptureWorker(QThread):
         self._webcam_frame_count = 0
         self._webcam_start_time: float | None = None
 
+        # Camera mode override (from set_capture_mode / Camera Settings dialog).
+        # Initialised here -- not in run() -- so a set_capture_mode() that arrives
+        # during the worker's slow startup isn't clobbered when the loop begins.
+        self._desired_mode: tuple[int, int, int] | None = None
+        self._force_reopen = False
+
     # ------------------------------------------------------------------
     # Public control (safe to call from UI thread)
     # ------------------------------------------------------------------
@@ -124,13 +130,11 @@ class CaptureWorker(QThread):
         """
         fields = WorkerConfig.__dataclass_fields__
         filtered = {k: v for k, v in kwargs.items() if k in fields}
+        # Read-modify-write under a single lock so concurrent configure() calls
+        # can't interleave and drop one another's field updates.
         with self._cfg_lock:
-            current = self._cfg
-        # Replace with updated values
-        current_dict = {f: getattr(current, f) for f in fields}
-        new_cfg = WorkerConfig(**{**current_dict, **filtered})
-        with self._cfg_lock:
-            self._cfg = new_cfg
+            current_dict = {f: getattr(self._cfg, f) for f in fields}
+            self._cfg = WorkerConfig(**{**current_dict, **filtered})
 
     def _snap_cfg(self) -> WorkerConfig:
         with self._cfg_lock:
@@ -240,10 +244,6 @@ class CaptureWorker(QThread):
         open_source: int | str | None = None
         video_fps = 0.0  # native fps of the current video file (0 for cameras)
         _cam_retry_after: float = 0.0  # monotonic time before which we skip camera reopen
-
-        # Camera mode override (from set_capture_mode / Camera Settings dialog)
-        self._desired_mode: tuple[int, int, int] | None = None
-        self._force_reopen = False
 
         try:
             while self._running:

@@ -134,11 +134,23 @@ def export_glb(
     -------
     Number of keyframes written after reduction.
     """
+    if not frames:
+        raise ValueError("export_glb: no frames to export")
+
     j, bin_data = _read_glb(source_glb)
 
     # -- find mesh node and morph target names --------------------------------
-    mesh_idx = 0  # default: first mesh
-    mesh = j["meshes"][mesh_idx]
+    # Pick the mesh that actually carries morph targets (the same choice
+    # head_mesh.load_head_mesh makes) instead of assuming mesh 0, so a multi-mesh
+    # GLB animates the right node.
+    meshes = j.get("meshes") or []
+    if not meshes:
+        raise ValueError("GLB has no meshes")
+    mesh_idx, mesh = next(
+        ((i, m) for i, m in enumerate(meshes)
+         if any(p.get("targets") for p in m.get("primitives", []))),
+        (0, meshes[0]),
+    )
     target_names: list[str] = mesh.get("extras", {}).get("targetNames", [])
     if not target_names:
         raise ValueError("GLB mesh has no targetNames in extras")

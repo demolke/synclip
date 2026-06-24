@@ -165,24 +165,33 @@ class IPCServer:
 
         data = _FRAME_STRUCT.pack(mode, audio_pos_ms, *bs, *rot[:3], *pos[:3])
 
-        dead: list[socket.socket] = []
+        # Snapshot under the lock, then send WITHOUT holding it: sendall can block
+        # up to the socket timeout on a stalled client, and send_frame runs once
+        # per captured frame -- holding the lock across the send would stall the
+        # capture pipeline and the accept/disconnect bookkeeping.
         with self._clients_lock:
-            for client in self._clients:
-                try:
-                    client.sendall(data)
-                except OSError:
-                    # Includes a send timeout (a stalled client) - drop it rather
-                    # than blocking the capture pipeline.
-                    dead.append(client)
-            for d in dead:
-                try:
-                    self._clients.remove(d)
-                except ValueError:
-                    pass  # already removed by _watch_client
-                try:
-                    d.close()
-                except OSError:
-                    pass
+            clients = list(self._clients)
+
+        dead: list[socket.socket] = []
+        for client in clients:
+            try:
+                client.sendall(data)
+            except OSError:
+                # Includes a send timeout (a stalled client) - drop it rather
+                # than blocking the capture pipeline.
+                dead.append(client)
+
+        if dead:
+            with self._clients_lock:
+                for d in dead:
+                    try:
+                        self._clients.remove(d)
+                    except ValueError:
+                        pass  # already removed by _watch_client
+                    try:
+                        d.close()
+                    except OSError:
+                        pass
 
     # ------------------------------------------------------------------
     # Properties

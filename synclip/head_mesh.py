@@ -129,10 +129,15 @@ def _view_array(gltf: dict, buf: bytes, view_idx: int, byte_offset: int,
     if stride == item_bytes:
         flat = np.frombuffer(buf, dtype=dtype, count=count * ncomp, offset=base_off)
         return flat.reshape(count, ncomp)
-    arr = np.empty((count, ncomp), dtype=dtype)
-    for i in range(count):
-        arr[i] = np.frombuffer(buf, dtype=dtype, count=ncomp, offset=base_off + i * stride)
-    return arr
+    # Interleaved (strided) buffer view: take the item_bytes of each stride slot
+    # in one vectorised pass. n_bytes stops exactly at the last element so we
+    # never read past the view (the final slot may omit trailing stride padding).
+    n_bytes = stride * (count - 1) + item_bytes
+    region = np.frombuffer(buf, dtype=np.uint8, count=n_bytes, offset=base_off)
+    rows = np.lib.stride_tricks.as_strided(
+        region, shape=(count, item_bytes), strides=(stride, 1)
+    )
+    return np.ascontiguousarray(rows).view(dtype).reshape(count, ncomp)
 
 
 def _accessor_array(gltf: dict, buf: bytes, accessor_idx: int) -> np.ndarray:

@@ -23,8 +23,11 @@ const MAGIC_MASK := 0xFFFFFF00
 # Handshake messages (length-prefixed JSON, see ipc_server.py).
 const HELLO_MAGIC  := 0xAF0001  # server -> client: blendshape name list
 const REPORT_MAGIC := 0xAF0005  # client -> server: mapping report
-const IPC_HOST  := "127.0.0.1"
-const IPC_PORT  := 9876
+const IPC_HOST_DEFAULT := "127.0.0.1"
+const IPC_PORT_DEFAULT := 9876
+# Settable in UI and overridable via --host/--port args
+var _ipc_host := IPC_HOST_DEFAULT
+var _ipc_port := IPC_PORT_DEFAULT
 
 enum Mode { LIVE, PLAYBACK }
 
@@ -79,6 +82,8 @@ var _mode_button: Button
 var _play_btn: Button
 var _loop_btn: Button
 var _status_label: Label
+var _host_edit: LineEdit
+var _port_spin: SpinBox
 var _file_list: ItemList
 var _take_list: ItemList
 var _blend_scale_sliders: Array = []
@@ -101,19 +106,43 @@ func _ready() -> void:
 	_camera = $ViewportContainer/SubViewport/Camera3D
 	_head_root = $ViewportContainer/SubViewport/Head
 
+	# Parse --host/--port (and a positional directory) before building the UI
+	var start_dir := _parse_cmdline_args()
+
 	_build_ui()
 	_find_head_mesh()
 
-	_tcp.connect_to_host(IPC_HOST, IPC_PORT)
+	_tcp.connect_to_host(_ipc_host, _ipc_port)
 
-	var args := OS.get_cmdline_user_args()
-	var start_dir: String
-	if args.size() > 0 and DirAccess.dir_exists_absolute(args[0]):
-		start_dir = args[0]
-	else:
+	if start_dir == "" or not DirAccess.dir_exists_absolute(start_dir):
 		var home := OS.get_environment("HOME")
 		start_dir = home if home != "" else "."
 	_set_directory(start_dir)
+
+
+## Parse user command-line args (those after `--`). Sets _ipc_host/_ipc_port from
+## --host/--port (both `--flag value` and `--flag=value` forms) and returns the
+## first non-flag argument as the start directory (or "" if none).
+func _parse_cmdline_args() -> String:
+	var args := OS.get_cmdline_user_args()
+	var start_dir := ""
+	var i := 0
+	while i < args.size():
+		var arg: String = args[i]
+		if arg == "--host" and i + 1 < args.size():
+			_ipc_host = args[i + 1]; i += 2; continue
+		elif arg.begins_with("--host="):
+			_ipc_host = arg.substr(7); i += 1; continue
+		elif arg == "--port" and i + 1 < args.size():
+			_ipc_port = int(args[i + 1]); i += 2; continue
+		elif arg.begins_with("--port="):
+			_ipc_port = int(arg.substr(7)); i += 1; continue
+		elif not arg.begins_with("-") and start_dir == "":
+			start_dir = arg
+		i += 1
+	if _ipc_host == "":
+		_ipc_host = IPC_HOST_DEFAULT
+	return start_dir
 
 
 func _process(delta: float) -> void:
@@ -131,7 +160,7 @@ func _process_live(delta: float) -> void:
 	match status:
 		StreamPeerTCP.STATUS_NONE, StreamPeerTCP.STATUS_ERROR:
 			_reconnect_after(delta)
-			_status_label.text = "LIVE - waiting for Python server on :%d" % IPC_PORT
+			_status_label.text = "LIVE - waiting for Python server on %s:%d" % [_ipc_host, _ipc_port]
 			return
 		StreamPeerTCP.STATUS_CONNECTING:
 			# Guard against a socket stuck in CONNECTING (server never accepts):
@@ -184,13 +213,25 @@ func _process_live(delta: float) -> void:
 		_rx_buf = _rx_buf.slice(_rx_buf.size() - FRAME_SIZE * 64)
 
 
+## Read the host/port fields and force an immediate reconnect to the new target.
+func _apply_server_target() -> void:
+	var h := _host_edit.text.strip_edges()
+	if h == "":
+		h = IPC_HOST_DEFAULT
+		_host_edit.text = h
+	_ipc_host = h
+	_ipc_port = int(_port_spin.value)
+	_status_label.text = "Reconnecting to %s:%d ..." % [_ipc_host, _ipc_port]
+	_reconnect_after(0.0, true)
+
+
 func _reconnect_after(delta: float, force: bool = false) -> void:
 	_tcp_reconnect_timer += delta
 	if force or _tcp_reconnect_timer >= TCP_RECONNECT_INTERVAL:
 		_tcp_reconnect_timer = 0.0
 		_tcp.disconnect_from_host()  # release the old peer before replacing it
 		_tcp = StreamPeerTCP.new()
-		_tcp.connect_to_host(IPC_HOST, IPC_PORT)
+		_tcp.connect_to_host(_ipc_host, _ipc_port)
 		_rx_buf.clear()
 		_handshake_done = false  # expect a fresh HELLO on the new connection
 
@@ -266,7 +307,7 @@ func _process_playback() -> void:
 	var take := SynClipData.get_take(_data, _current_take_id)
 	if take.is_empty():
 		return
-	var frames: Array = take.get("frames", [])
+	var frames: Array = SynClipData.get_take_frames(take)
 	if frames.is_empty():
 		return
 	var values := _interpolate_frames(frames, pos_ms)
@@ -545,7 +586,7 @@ func _refresh_takes_list() -> void:
 		var star := " *" if tid == default_id else "  "
 		var ts: String = take.get("timestamp_utc", "")
 		var date_part := ts.substr(0, 16).replace("T", " ") if ts.length() >= 16 else ""
-		var frame_count: int = (take.get("frames", []) as Array).size()
+		var frame_count: int = SynClipData.get_take_frames(take).size()
 		_take_list.add_item("%s%s  %s  [%d frames]" % [tid, star, date_part, frame_count])
 		_take_list.set_item_metadata(_take_list.item_count - 1, tid)
 
@@ -932,6 +973,31 @@ func _make_top_bar() -> HBoxContainer:
 	stop_btn.text = "Stop"
 	stop_btn.pressed.connect(func() -> void: _audio_player.stop())
 	bar.add_child(stop_btn)
+
+	# Server target (host:port) - editable, with a Connect button to (re)connect.
+	bar.add_child(VSeparator.new())
+	var srv_lbl := Label.new()
+	srv_lbl.text = "Server:"
+	bar.add_child(srv_lbl)
+	_host_edit = LineEdit.new()
+	_host_edit.text = _ipc_host
+	_host_edit.custom_minimum_size = Vector2(110, 0)
+	_host_edit.tooltip_text = "Host/IP of the SynClip capture tool's IPC server"
+	_host_edit.text_submitted.connect(func(_t): _apply_server_target())
+	bar.add_child(_host_edit)
+	_port_spin = SpinBox.new()
+	_port_spin.min_value = 1
+	_port_spin.max_value = 65535
+	_port_spin.step = 1
+	_port_spin.value = _ipc_port
+	_port_spin.custom_minimum_size = Vector2(80, 0)
+	_port_spin.tooltip_text = "TCP port of the SynClip capture tool's IPC server"
+	bar.add_child(_port_spin)
+	var connect_btn := Button.new()
+	connect_btn.text = "Connect"
+	connect_btn.tooltip_text = "Apply the host/port and (re)connect to the capture tool"
+	connect_btn.pressed.connect(_apply_server_target)
+	bar.add_child(connect_btn)
 
 	bar.add_child(VSeparator.new())
 	var head_lbl := Label.new()

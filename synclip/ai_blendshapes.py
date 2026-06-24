@@ -206,7 +206,7 @@ def generate_from_audio(
     """Return timed ARKit-52 frames for *audio_path*.
 
     Each entry is {"audio_position_ms": float, "blendshapes": [52 floats]}.
-    Uses the real model when ``model_available()``; otherwise emits dummy
+    Uses the in-process model when ``model_available()``; otherwise emits dummy
     neutral frames. Never raises for a missing model.
     """
     if not model_available():

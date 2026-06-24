@@ -293,7 +293,10 @@ def append_take(
         "notes": "",
         "blend_scales": {name: 1.0 for name in BLENDSHAPE_NAMES},
         "capture_settings": capture_settings or {},
-        "frames": frames,
+        # All blendshape tracks live here, keyed by name. The recorded capture is
+        # the "mediapipe" stream; ai/retarget/rhubarb/... are added to the same
+        # take as they are generated. There is no doc-level stream storage.
+        "streams": {"mediapipe": frames},
     }
 
     data["takes"].append(new_take)
@@ -353,66 +356,6 @@ def delete_take(audio_path: str, take_id: str) -> None:
             data["default_take"] = None
 
     save_synclip(audio_path, data)
-
-
-def update_take_frames(audio_path: str, take_id: str, frames: list[dict]) -> None:
-    """Replace the *frames* list of an existing take in the synclip file."""
-    data = load_synclip(audio_path)
-    if data is None:
-        raise FileNotFoundError(f"No synclip file for {audio_path!r}")
-    for take in data["takes"]:
-        if take["take_id"] == take_id:
-            take["frames"] = frames
-            save_synclip(audio_path, data)
-            return
-    raise ValueError(f"take_id {take_id!r} not found")
-
-
-# ---------------------------------------------------------------------------
-# Generic named streams (mediapipe lives in the takes; ai/retarget/... here)
-# ---------------------------------------------------------------------------
-
-def save_stream(audio_path: str, name: str, frames: list[dict]) -> None:
-    """Persist a named blendshape stream (e.g. "ai", "retarget") at doc level."""
-    data = load_synclip(audio_path)
-    if data is None:
-        return  # no synclip file yet; skip
-    streams = data.setdefault("streams", {})
-    streams[name] = {"frames": frames}
-    # Keep the legacy mirror so older builds still find the AI frames.
-    if name == "ai":
-        data["ai_frames"] = frames
-    save_synclip(audio_path, data)
-
-
-def load_stream(audio_path: str, name: str) -> list[dict]:
-    """Return a previously saved named stream, or an empty list.
-
-    Falls back to the legacy ``ai_frames`` key for the "ai" stream so old files
-    keep working.
-    """
-    data = load_synclip(audio_path)
-    if data is None:
-        return []
-    streams = data.get("streams", {})
-    entry = streams.get(name)
-    if entry and entry.get("frames"):
-        return list(entry["frames"])
-    if name == "ai":
-        return list(data.get("ai_frames", []))
-    return []
-
-
-# -- legacy aliases -----------------------------------------------------------
-
-def save_ai_frames(audio_path: str, frames: list[dict]) -> None:
-    """Back-compat alias: persist the "ai" stream."""
-    save_stream(audio_path, "ai", frames)
-
-
-def load_ai_frames(audio_path: str) -> list[dict]:
-    """Back-compat alias: load the "ai" stream."""
-    return load_stream(audio_path, "ai")
 
 
 def rename_take(audio_path: str, take_id: str, name: str) -> None:

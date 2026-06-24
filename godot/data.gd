@@ -50,3 +50,7 @@ static func get_take(data: Dictionary, take_id: String) -> Dictionary:
 		if take.get("take_id", "") == take_id:
 			return take
 	return {}
+
+
+static func get_take_frames(take: Dictionary) -> Array:
+	return take.get("streams", {}).get("mediapipe", [])

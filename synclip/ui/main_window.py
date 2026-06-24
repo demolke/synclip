@@ -266,10 +266,11 @@ class MainWindow(QMainWindow):
     """Top-level application window, driven by AppStateMachine + _apply(plan)."""
 
     def __init__(self, root_dir: str, video_source: int | str = 0,
-                 ipc_port: int = 9876) -> None:
+                 ipc_port: int = 9876, ipc_host: str = "127.0.0.1") -> None:
         super().__init__()
 
         self._root_dir = root_dir
+        self._ipc_host = ipc_host
         self._ipc_port = ipc_port
         self._init_complete = False  # guards _save_ui_config during startup
 
@@ -428,14 +429,24 @@ class MainWindow(QMainWindow):
             if cfg.camera:
                 self._quad.set_camera(i, cfg.camera)
 
+    def _track_names(self) -> list[str]:
+        """Every available track, mediapipe first (the always-present base),
+        then each other loaded stream. The single source of truth for the input
+        modifier's stream picker and the bottom editor panel."""
+        rest = [n for n in self._streams.names() if n != "mediapipe"]
+        return ["mediapipe"] + rest
+
     def _build_streams(self, raw: list[float], ai_vals: list[float] | None,
                        pos_ms: float) -> dict:
-        """The named sample streams available to the modifier stacks."""
-        return {
-            "mediapipe": raw,
-            "ai": ai_vals,
-            "retarget": self._streams.sample("retarget", pos_ms),
-        }
+        """The named sample streams available to the modifier stacks at *pos_ms*.
+
+        Every loaded stream is sampled dynamically; mediapipe and ai are then
+        overridden with the live/edited values the caller passes in."""
+        streams = self._streams.sample_all(pos_ms)
+        streams["mediapipe"] = raw
+        if ai_vals is not None:
+            streams["ai"] = ai_vals
+        return streams
 
     def _update_pipeline_streams(self) -> None:
         """Push the full take/AI/retarget streams into every pipeline so each
@@ -445,6 +456,9 @@ class MainWindow(QMainWindow):
             return
         for pipe in self._pipelines:
             pipe.set_streams(self._streams.prepare_all())
+        # Keep the modifier editors' stream pickers in sync with the live tracks.
+        if hasattr(self, "_modifier_stack"):
+            self._modifier_stack.set_available_streams(self._track_names())
         self._refresh_modifier_status()
 
     def _drive_previews(self, raw: list[float], ai_vals: list[float] | None,
@@ -452,10 +466,11 @@ class MainWindow(QMainWindow):
         """Run every view pipeline over the streams, update the quad and bars,
         return the output view's weights."""
         streams = self._build_streams(raw, ai_vals, pos_ms)
+        duration_ms = self._audio.duration_ms or 0.0
         out = list(raw)
         selected_mix: list[float] = list(raw)
         for i, pipe in enumerate(self._pipelines):
-            w, view_pose = pipe.process(streams, pose, pos_ms)
+            w, view_pose = pipe.process(streams, pose, pos_ms, duration_ms)
             if hasattr(self, "_quad"):
                 self._quad.set_weights(i, w)
                 self._quad.set_head_pose(i, view_pose)
@@ -463,19 +478,31 @@ class MainWindow(QMainWindow):
                 out = w
             if i == self._selected_view:
                 selected_mix = w
-        # Update bars according to the selected source.
+                self._update_selected_influence(pipe, streams, pos_ms, duration_ms)
+        # Keep the docked influence curve's playhead aligned with the clip.
+        self._update_influence_playhead(pos_ms)
+        # Update bars according to the selected source. "mix" shows the selected
+        # view's pipeline output; any other entry is a track read straight from
+        # the (dynamically sampled) stream set -- no per-backend branches.
         if hasattr(self, "_bars_source_combo"):
             src = self._bars_source_combo.currentData()
-            if src == "mediapipe":
-                self._bars.set_values(list(raw))
-            elif src == "ai" and ai_vals is not None:
-                self._bars.set_values(list(ai_vals))
-            elif src == "retarget":
-                rt = self._streams.sample("retarget", pos_ms)
-                self._bars.set_values(rt if rt is not None else [0.0] * 52)
-            else:  # "mix"
+            if src == "mix":
                 self._bars.set_values(selected_mix)
+            else:
+                vals = streams.get(src)
+                self._bars.set_values(list(vals) if vals is not None else [0.0] * 52)
         return out
+
+    def _update_selected_influence(self, pipe, streams, pos_ms: float,
+                                   duration_ms: float) -> None:
+        """Push each modifier's live effective influence to the bound stack rows
+        (shown as the absolute-mode readout)."""
+        if not hasattr(self, "_modifier_stack"):
+            return
+        ctx = mod_mod.ModifierContext(streams=streams, pos_ms=pos_ms,
+                                      duration_ms=duration_ms)
+        for ri, m in enumerate(pipe._modifiers):
+            self._modifier_stack.set_row_influence(ri, m.effective_influence(ctx))
 
     def _reset_pipelines(self) -> None:
         for pipe in self._pipelines:
@@ -626,7 +653,7 @@ class MainWindow(QMainWindow):
         self._worker.process_finished.connect(self._on_process_finished)
         self._worker.start()
 
-        self._ipc = IPCServer(port=self._ipc_port)
+        self._ipc = IPCServer(host=self._ipc_host, port=self._ipc_port)
         self._ipc.start()
 
         # Enumerate cameras ONCE at startup (opening indices 0-9 is slow and must
@@ -709,9 +736,10 @@ class MainWindow(QMainWindow):
         bars_header_lay.setContentsMargins(0, 0, 0, 0)
         bars_header_lay.addWidget(QLabel("Show:"))
         self._bars_source_combo = QComboBox(central)
-        # "mix" and "mediapipe" are always present; named streams added dynamically.
-        self._bars_source_combo.addItem("Mix (selected view)", "mix")
-        self._bars_source_combo.addItem("Mediapipe (camera)", "mediapipe")
+        # "mix" (the read-only pipeline output) is the only fixed entry; every
+        # track is added dynamically by _update_bars_source_combo, by name.
+        self._bars_source_combo.addItem("mix", "mix")
+        self._bars_source_combo.addItem("mediapipe", "mediapipe")
         self._bars_source_combo.currentIndexChanged.connect(self._on_bars_source_changed)
         bars_header_lay.addWidget(self._bars_source_combo)
         bars_header_lay.addStretch(1)
@@ -721,6 +749,7 @@ class MainWindow(QMainWindow):
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.setSpacing(4)
         bottom_layout.addWidget(transport)
+        bottom_layout.addWidget(self._build_influence_editor(central))
         bottom_layout.addWidget(bars_header)
         bottom_layout.addWidget(self._bottom_stack)
 
@@ -972,6 +1001,101 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._time_label)
         return row
 
+    # ==================================================================
+    # Influence-curve editor (docked under the timeline, scrub-synced)
+    # ==================================================================
+
+    def _build_influence_editor(self, parent: QWidget) -> QWidget:
+        """The shared influence-curve editor shown directly under the timeline so
+        its x-axis lines up with the scrubber. Hidden until a modifier row's
+        curve button selects it; one curve edited at a time."""
+        panel = QWidget(parent)
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+
+        head = QHBoxLayout()
+        self._infl_curve_title = QLabel("Influence curve", panel)
+        self._infl_curve_title.setStyleSheet("color:#9cf;")
+        head.addWidget(self._infl_curve_title)
+        head.addStretch(1)
+        close_btn = QPushButton("×", panel)
+        close_btn.setFixedWidth(26)
+        close_btn.setToolTip("Close the influence-curve editor")
+        close_btn.clicked.connect(self._close_influence_editor)
+        head.addWidget(close_btn)
+        lay.addLayout(head)
+
+        # The CurveEditor is rebuilt per binding (its y-range/reference depend on
+        # the mode), so it lives in a swappable host.
+        self._infl_curve_host = QWidget(panel)
+        self._infl_curve_host_lay = QVBoxLayout(self._infl_curve_host)
+        self._infl_curve_host_lay.setContentsMargins(0, 0, 0, 0)
+        self._infl_curve_host.setMinimumHeight(120)
+        lay.addWidget(self._infl_curve_host)
+
+        self._influence_editor = None          # current CurveEditor or None
+        self._influence_curve_mc = None         # bound ModifierConfig or None
+        self._influence_editor_panel = panel
+        panel.setVisible(False)
+        return panel
+
+    def _on_influence_curve_selected(self, mc) -> None:
+        if mc is None:
+            self._close_influence_editor()
+        else:
+            self._bind_influence_editor(mc)
+
+    def _bind_influence_editor(self, mc) -> None:
+        from .curve_editor import CurveEditor
+        if self._influence_editor is not None:
+            self._influence_editor.setParent(None)
+            self._influence_editor.deleteLater()
+            self._influence_editor = None
+
+        if mc.influence_anim == "relative":
+            y_range, ref = (-1.0, 1.0), 0.0          # signed offset, neutral 0
+            default = [(0.0, 0.0), (1.0, 0.0)]
+        else:  # absolute
+            y_range, ref = (0.0, 1.0), float(mc.influence)
+            default = [(0.0, mc.influence), (1.0, mc.influence)]
+
+        ed = CurveEditor(self._infl_curve_host, eval_mode="animation",
+                         y_range=y_range, reference=ref, default_points=default)
+        ed.set_points([(p[0], p[1]) for p in mc.influence_curve])
+        ed.curve_changed.connect(self._on_influence_curve_changed)
+        self._infl_curve_host_lay.addWidget(ed)
+        self._influence_editor = ed
+        self._influence_curve_mc = mc
+
+        cls = mod_mod.get_class(mc.type)
+        name = cls.display_name if cls else mc.type
+        self._infl_curve_title.setText(f"Influence curve — {name} ({mc.influence_anim})")
+        self._influence_editor_panel.setVisible(True)
+        self._update_influence_playhead(self._audio.get_position_ms())
+
+    def _on_influence_curve_changed(self, points) -> None:
+        if self._influence_curve_mc is None:
+            return
+        self._influence_curve_mc.influence_curve = [list(p) for p in points]
+        self._on_modifier_stack_changed()
+
+    def _close_influence_editor(self) -> None:
+        self._influence_curve_mc = None
+        if hasattr(self, "_modifier_stack"):
+            self._modifier_stack.clear_curve_editing()
+        if self._influence_editor is not None:
+            self._influence_editor.setParent(None)
+            self._influence_editor.deleteLater()
+            self._influence_editor = None
+        self._influence_editor_panel.setVisible(False)
+
+    def _update_influence_playhead(self, pos_ms: float) -> None:
+        if getattr(self, "_influence_editor", None) is None:
+            return
+        dur = self._audio.duration_ms or 0.0
+        self._influence_editor.set_playhead(pos_ms / dur if dur > 0 else None)
+
     def _on_toggle_pause(self) -> None:
         plan = self._sm.plan()
         if plan.paused:
@@ -1076,35 +1200,30 @@ class MainWindow(QMainWindow):
         self._save_ui_config()
 
     def _reset_ai_cache(self) -> None:
-        self._streams.clear("ai")
-        self._streams.clear("retarget")
+        """Drop every generated track, keeping only the mediapipe base."""
+        for name in self._streams.names():
+            if name != "mediapipe":
+                self._streams.clear(name)
         self._ai_gen_for_audio = None
         self._update_bars_source_combo()
         self._update_pipeline_streams()
 
     def _update_bars_source_combo(self) -> None:
-        """Rebuild the track list dynamically from whichever streams are loaded."""
+        """Rebuild the bottom-panel track list dynamically from the live tracks.
+
+        "mix" is the only static entry (the read-only pipeline output); every
+        other item is whatever track currently exists in the stream store, so no
+        backend names are hardcoded here."""
         if not hasattr(self, "_bars_source_combo"):
             return
         combo = self._bars_source_combo
         prev = combo.currentData()
 
-        # Static entry: mediapipe is always present (live camera or recorded).
-        # Dynamic entries: named streams added only when they have data.
-        desired: list[tuple[str, str]] = [("Mediapipe (camera)", "mediapipe")]
-        named = [
-            ("AI frames", "ai"),
-            ("Retarget frames", "retarget"),
-        ]
-        for label, key in named:
-            if self._streams.has(key):
-                desired.append((label, key))
-
         # Remove stale dynamic entries (everything except "mix" at index 0).
         while combo.count() > 1:
             combo.removeItem(1)
-        for label, key in desired:
-            combo.addItem(label, key)
+        for name in self._track_names():
+            combo.addItem(name, name)
 
         # Restore the previous selection if still valid, else fall back to mix.
         idx = combo.findData(prev)
@@ -1113,29 +1232,30 @@ class MainWindow(QMainWindow):
     def _on_bars_source_changed(self, _idx: int) -> None:
         src = self._bars_source_combo.currentData()
         in_review = self._sm.mode == Mode.REVIEW
-        # Only "mix" is read-only; all named tracks (mediapipe, ai, retarget) are editable.
+        # Only "mix" (the pipeline output) is read-only; every track is editable.
         editable_src = src != "mix"
         self._value_editor.set_read_only(not in_review or not editable_src)
         self._refresh_all_previews()
 
-    def _try_restore_ai_frames(self, audio_path: str) -> None:
-        """Load persisted AI + retarget streams for *audio_path* if they exist."""
+    def _generate_rhubarb_stream(self, audio_path: str | None,
+                                 duration_ms: float) -> None:
+        """During Process: if the rhubarb binary is present, generate a viseme
+        track from the audio and add it to the live stream set as ``rhubarb``.
+
+        Persistence is the caller's job (the streams are written into the take
+        as a whole). No-op, and never raises, when rhubarb isn't installed.
+        """
+        from .. import rhubarb_lipsync
+        if not audio_path or not rhubarb_lipsync.is_available():
+            return
         try:
-            frames = data_mod.load_stream(audio_path, "ai")
-        except Exception:
-            frames = []
-        try:
-            rt = data_mod.load_stream(audio_path, "retarget")
-        except Exception:
-            rt = []
-        if rt:
-            self._streams.set("retarget", rt)
+            frames = rhubarb_lipsync.generate_from_audio(
+                audio_path, duration_ms=duration_ms)
+        except Exception as exc:
+            print(f"[main_window] rhubarb generation failed: {exc}")
+            return
         if frames:
-            self._streams.set("ai", frames)
-            self._ai_gen_for_audio = audio_path
-            self._update_bars_source_combo()
-        if frames or rt:
-            self._update_pipeline_streams()
+            self._streams.set("rhubarb", frames)
 
     def _refresh_review_frame(self) -> None:
         """Re-push the current REVIEW frame after a mixer change."""
@@ -1232,8 +1352,10 @@ class MainWindow(QMainWindow):
 
         # The generic, per-view modifier stack.
         self._modifier_stack = ModifierStackWidget(panel)
-        self._modifier_stack.set_available_streams(["mediapipe", "ai", "retarget"])
+        self._modifier_stack.set_available_streams(self._track_names())
         self._modifier_stack.changed.connect(self._on_modifier_stack_changed)
+        self._modifier_stack.influence_curve_selected.connect(
+            self._on_influence_curve_selected)
         scroll = QScrollArea(panel)
         scroll.setWidget(self._modifier_stack)
         scroll.setWidgetResizable(True)
@@ -1357,39 +1479,29 @@ class MainWindow(QMainWindow):
         self._emit_frame(pos_ms, out, self._last_head_pose)
 
     def _on_value_edited(self, idx: int, value: float) -> None:
+        """Single edit path for every track. Edits the selected stream's frame
+        in place (mediapipe, ai, retarget, rhubarb, ...), schedules a take save,
+        and re-broadcasts the recomputed output as a keyframe overwrite."""
         src = self._bars_source_combo.currentData() if hasattr(self, "_bars_source_combo") else "mediapipe"
+        if src == "mix":
+            return  # the pipeline output is read-only
         pos_ms = self._audio.get_position_ms()
-        if src in ("ai", "retarget"):
-            frames = self._streams.frames(src)
-            positions = self._streams.positions(src)
-            stream_name = src
-            frame_i = self._nearest_frame_index(pos_ms, positions)
-            if frame_i is None or not frames or frame_i >= len(frames):
-                return
-            bs = frames[frame_i].get("blendshapes")
-            if not bs or idx >= len(bs):
-                return
-            bs[idx] = value
-            if self._current_audio_path:
-                try:
-                    data_mod.save_stream(self._current_audio_path, stream_name, frames)
-                except Exception:
-                    pass
-            self._refresh_review_frame()
-            self._refresh_all_previews()
-        else:
-            # Edit the raw mediapipe take frames.
-            frame_i = self._nearest_frame_index(pos_ms)
-            mp_frames = self._streams.frames("mediapipe")
-            if frame_i is None or not mp_frames:
-                return
-            frame = mp_frames[frame_i]
-            bs = frame.get("blendshapes")
-            if not bs or idx >= len(bs):
-                return
-            bs[idx] = value
-            self._schedule_take_save()
-            self._emit_frame(pos_ms, list(bs), frame.get("head_pose"), mode=MODE_EDIT)
+        frames = self._streams.frames(src)
+        positions = self._streams.positions(src)
+        frame_i = self._nearest_frame_index(pos_ms, positions)
+        if frame_i is None or not frames or frame_i >= len(frames):
+            return
+        bs = frames[frame_i].get("blendshapes")
+        if not bs or idx >= len(bs):
+            return
+        bs[idx] = value
+        self._schedule_take_save()
+        # Recompute the output (drives the previews) and broadcast it as an edit.
+        values = self._review_blendshapes(pos_ms, reset_first=True)
+        if values:
+            mp = self._streams.get("mediapipe")
+            pose = mp.head_pose_at(pos_ms) if mp else None
+            self._emit_frame(pos_ms, values, pose, mode=MODE_EDIT)
 
     def _nearest_frame_index(
         self, audio_pos_ms: float, positions: list[float] | None = None
@@ -1411,8 +1523,26 @@ class MainWindow(QMainWindow):
     def _schedule_take_save(self) -> None:
         self._save_timer.start(400)
 
+    def _sync_streams_into_take(self) -> None:
+        """Write the live in-memory stream set into the current take of the doc.
+
+        The StreamStore is the single source of truth for the current take; this
+        copies every track (mediapipe/ai/retarget/rhubarb/...) into the take so a
+        whole-doc save persists them. Streams the take no longer has are dropped.
+        """
+        if self._current_synclip is None or not self._current_take_id:
+            return
+        for take in self._current_synclip.get("takes", []):
+            if take.get("take_id") == self._current_take_id:
+                take["streams"] = {
+                    name: self._streams.frames(name)
+                    for name in self._streams.names()
+                }
+                return
+
     def _save_current_take(self) -> None:
         if self._current_audio_path and self._current_synclip is not None:
+            self._sync_streams_into_take()
             try:
                 data_mod.save_synclip(self._current_audio_path, self._current_synclip)
                 self._statusbar.showMessage("Take edits saved", 1500)
@@ -1481,9 +1611,8 @@ class MainWindow(QMainWindow):
         take_stream = Stream(mp.frames, mp.positions) if mp else Stream()
         named_streams = {
             name: Stream(s.frames, s.positions)
-            for name, s in [("ai", self._streams.get("ai")),
-                            ("retarget", self._streams.get("retarget"))]
-            if s is not None
+            for name, s in ((n, self._streams.get(n)) for n in self._streams.names())
+            if name != "mediapipe" and s is not None
         }
         out_frames = pipe.process_all(take_stream, named_streams)
         try:
@@ -1589,13 +1718,7 @@ class MainWindow(QMainWindow):
             return
         updated = result.frames
         self._streams.set("retarget", updated)
-        if self._current_audio_path:
-            try:
-                data_mod.save_stream(
-                    self._current_audio_path, "retarget", updated
-                )
-            except Exception as exc:
-                print(f"[retarget] save failed: {exc}")
+        self._save_current_take()  # persists the whole take, retarget included
         self._update_pipeline_streams()
         self._refresh_all_previews()
         self._statusbar.showMessage(
@@ -1728,11 +1851,10 @@ class MainWindow(QMainWindow):
         file-type-specific fields.
         """
         self._reset_ai_cache()
-        self._try_restore_ai_frames(path)
         self._current_synclip = data_mod.load_synclip(path)
         self._takes_panel.load_takes(self._current_synclip)
         self._current_take_id = None
-        self._streams.clear("mediapipe")
+        self._streams.clear_all()
         if self._current_synclip:
             take_ids = {t.get("take_id") for t in self._current_synclip.get("takes", [])}
             want_id = prefer_take_id if prefer_take_id in take_ids else None
@@ -2007,10 +2129,11 @@ class MainWindow(QMainWindow):
             self._apply(self._sm.to_live())
             self._statusbar.showMessage("Processing produced no frames.", 4000)
             return
+        recorded = list(self._recorded_frames)
         try:
             new_take = data_mod.append_take(
                 self._current_audio_path,
-                list(self._recorded_frames),
+                recorded,
                 audio_duration_ms,
                 capture_settings=self._gather_capture_settings(),
             )
@@ -2018,19 +2141,30 @@ class MainWindow(QMainWindow):
             self._statusbar.showMessage(f"Save error: {exc}", 5000)
             self._apply(self._sm.to_live())
             return
-        # Save AI frames generated during the process pass.
-        if ai_frames:
-            try:
-                data_mod.save_ai_frames(self._current_audio_path, ai_frames)
-            except Exception:
-                pass
-        self._reload_synclip()
         new_take_id = new_take.get("take_id")
+        # The new take is the live set. Populate the in-memory streams directly
+        # from what we just generated (the source of truth) so they survive even
+        # if persistence fails -- no disk round-trip required to see them.
+        self._reload_synclip()
+        self._current_take_id = new_take_id
+        self._streams.clear_all()
+        self._streams.set("mediapipe", recorded)
+        if ai_frames:
+            nonzero = sum(1 for f in ai_frames if any(f.get("blendshapes", [])))
+            print(f"[main_window] AI stream: received {len(ai_frames)} frames "
+                  f"from generator ({nonzero} non-neutral)")
+            self._streams.set("ai", ai_frames)
+            self._ai_gen_for_audio = self._current_audio_path
+        else:
+            print("[main_window] AI stream: generator returned no frames")
+        # Rhubarb viseme track (optional, offline) generated during Process.
+        self._generate_rhubarb_stream(self._current_audio_path, audio_duration_ms)
+        # Persist every generated track into the take in one write.
+        self._save_current_take()
         if new_take_id:
-            self._set_current_take_by_id(new_take_id)
-            self._takes_panel.load_takes(self._current_synclip)
-        # Load the AI frames we just saved so they're immediately available.
-        self._try_restore_ai_frames(self._current_audio_path)
+            self._takes_panel.select_take(new_take_id)
+        self._update_bars_source_combo()
+        self._update_pipeline_streams()
         # Run retargeting while still in PROCESS_VIDEO mode so the audio/video
         # player stays paused and the OpenGL renderer isn't driven by playback
         # timers during the analysis-by-synthesis grab loop.
@@ -2105,13 +2239,16 @@ class MainWindow(QMainWindow):
 
     def _set_current_take_by_id(self, take_id: str) -> None:
         self._current_take_id = take_id
-        self._streams.clear("mediapipe")
+        # A take owns all its tracks; load them as the new live stream set.
+        self._streams.clear_all()
         if self._current_synclip is None:
             self._update_bars_source_combo()
             return
         for take in self._current_synclip.get("takes", []):
             if take.get("take_id") == take_id:
-                self._streams.set("mediapipe", take.get("frames", []))
+                for name, frames in (take.get("streams") or {}).items():
+                    if frames:
+                        self._streams.set(name, frames)
                 self._apply_capture_settings(take.get("capture_settings", {}))
                 break
         self._update_bars_source_combo()

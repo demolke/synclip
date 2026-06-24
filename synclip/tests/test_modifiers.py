@@ -114,3 +114,75 @@ def test_closure_status_text():
 def test_base_modifier_status_text_empty():
     m = M.create(ModifierConfig("smooth", influence=0.5))
     assert m.status_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Animated (time-varying) influence
+# ---------------------------------------------------------------------------
+
+def test_sample_curve_is_piecewise_linear_and_unclamped():
+    from ..curve_lut import sample_curve
+    pts = [[0.0, -1.0], [0.5, 1.0], [1.0, 0.0]]
+    assert sample_curve(pts, 0.0) == -1.0          # endpoint
+    assert sample_curve(pts, 0.5) == 1.0           # peak (non-monotone, no clamp)
+    assert abs(sample_curve(pts, 0.25) - 0.0) < 1e-9   # midway -1 -> 1
+    assert abs(sample_curve(pts, 0.75) - 0.5) < 1e-9   # midway 1 -> 0
+    assert sample_curve(pts, 2.0) == 0.0           # past the end holds last y
+    assert sample_curve([], 0.5) == 0.0
+
+
+def test_effective_influence_off_returns_static():
+    m = M.create(ModifierConfig("input", influence=0.7))
+    assert m.effective_influence(ModifierContext({}, pos_ms=500.0, duration_ms=1000.0)) == 0.7
+
+
+def test_effective_influence_zero_duration_returns_static():
+    cfg = ModifierConfig("input", influence=0.4, influence_anim="absolute",
+                         influence_curve=[[0.0, 1.0], [1.0, 1.0]])
+    m = M.create(cfg)
+    # No clip length (e.g. LIVE) -> animation inert, base used.
+    assert m.effective_influence(ModifierContext({}, pos_ms=0.0, duration_ms=0.0)) == 0.4
+
+
+def test_effective_influence_relative_punches_up_and_down():
+    # base 0.5; offset curve goes +0.5 at start (punch up to 1.0) and -0.5 at end.
+    cfg = ModifierConfig("input", influence=0.5, influence_anim="relative",
+                         influence_curve=[[0.0, 0.5], [1.0, -0.5]])
+    m = M.create(cfg)
+    assert abs(m.effective_influence(ModifierContext({}, 0.0, 1000.0)) - 1.0) < 1e-9
+    assert abs(m.effective_influence(ModifierContext({}, 500.0, 1000.0)) - 0.5) < 1e-9
+    assert abs(m.effective_influence(ModifierContext({}, 1000.0, 1000.0)) - 0.0) < 1e-9
+
+
+def test_effective_influence_relative_clamps_to_unit():
+    # base 0.8 + offset 0.8 would be 1.6 -> clamped to 1.0 (no overshoot).
+    cfg = ModifierConfig("input", influence=0.8, influence_anim="relative",
+                         influence_curve=[[0.0, 0.8], [1.0, 0.8]])
+    m = M.create(cfg)
+    assert m.effective_influence(ModifierContext({}, 0.0, 1000.0)) == 1.0
+
+
+def test_effective_influence_absolute_ignores_base():
+    cfg = ModifierConfig("input", influence=0.9, influence_anim="absolute",
+                         influence_curve=[[0.0, 0.0], [1.0, 1.0]])
+    m = M.create(cfg)
+    assert abs(m.effective_influence(ModifierContext({}, 250.0, 1000.0)) - 0.25) < 1e-9
+
+
+def test_animated_influence_drives_input_modifier_blend():
+    # InputModifier mixing an 'ai' stream, absolute influence ramp 0 -> 1.
+    cfg = ModifierConfig("input", influence=1.0, influence_anim="absolute",
+                         influence_curve=[[0.0, 0.0], [1.0, 1.0]],
+                         params={"stream": "ai", "scope": ai.SCOPE_ALL})
+    m = M.create(cfg)
+    streams = {"ai": [0.8] * 52}
+    out0, _ = m.apply([0.2] * 52, None, ModifierContext(streams, 0.0, 1000.0))
+    outm, _ = m.apply([0.2] * 52, None, ModifierContext(streams, 500.0, 1000.0))
+    assert abs(out0[_IDX["jawOpen"]] - 0.2) < 1e-9   # influence 0 -> base
+    assert abs(outm[_IDX["jawOpen"]] - 0.5) < 1e-9   # influence 0.5 -> halfway
+
+
+def test_influence_curve_round_trips_through_dict():
+    cfg = ModifierConfig("input", influence=0.5, influence_anim="relative",
+                         influence_curve=[[0.0, 0.2], [1.0, -0.3]])
+    assert ModifierConfig.from_dict(cfg.to_dict()) == cfg

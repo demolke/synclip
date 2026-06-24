@@ -50,6 +50,37 @@ class TestT04MediapipeGate:
         assert w._snap_cfg().run_mediapipe is True
 
 
+class TestCameraModeInit:
+    """Camera-mode attributes are initialised in __init__, so a set_capture_mode()
+    arriving before run() starts is preserved (not clobbered by the loop)."""
+
+    def test_defaults_present_without_run(self):
+        w = CaptureWorker(source=0)
+        assert w._desired_mode is None
+        assert w._force_reopen is False
+
+    def test_set_capture_mode_before_run_is_retained(self):
+        w = CaptureWorker(source=0)
+        w.set_capture_mode(1280, 720, 30)
+        assert w._desired_mode == (1280, 720, 30)
+        assert w._force_reopen is True
+
+
+class TestConfigureAtomicity:
+    """A single configure() call updates only the named field and preserves the
+    rest (the read-modify-write happens under one lock)."""
+
+    def test_partial_update_preserves_other_fields(self):
+        w = CaptureWorker(source=0)
+        w.configure(source="clip.mp4", run_mediapipe=False, throttle_fps=None)
+        w.configure(paused=True)  # touch only one field
+        cfg = w._snap_cfg()
+        assert cfg.paused is True
+        assert cfg.source == "clip.mp4"
+        assert cfg.run_mediapipe is False
+        assert cfg.throttle_fps is None
+
+
 # ---------------------------------------------------------------------------
 # T-05: throttle_fps=None -> no sleep; throttle_fps=60 -> sleep called
 # ---------------------------------------------------------------------------

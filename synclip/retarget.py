@@ -248,20 +248,18 @@ def retarget_stream(
     if use_pool:
         cfg_dict = cfg.to_dict()
         ctx = _mp.get_context("spawn")
+        updated = []
         with ctx.Pool(
             processes=n_workers,
             initializer=_mp_init,
             initargs=(mesh, width, height, cfg_dict, mask),
         ) as pool:
-            results = pool.map(_mp_frame, frames)
-
-        updated = []
-        for i, (new_frame, detected) in enumerate(results):
-            updated.append(new_frame)
-            if detected:
-                any_detected = True
-            if progress_cb is not None:
-                progress_cb(i + 1, total)
+            for i, (new_frame, detected) in enumerate(pool.imap(_mp_frame, frames)):
+                updated.append(new_frame)
+                if detected:
+                    any_detected = True
+                if progress_cb is not None:
+                    progress_cb(i + 1, total)
 
         return Stream.from_frames(updated), any_detected
 

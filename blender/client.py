@@ -234,7 +234,9 @@ def _build_key_map(obj: "bpy.types.Object",
 class SynClipReceiver:
     """Manages the TCP socket and inserts Blender keyframes."""
 
-    def __init__(self) -> None:
+    def __init__(self, host: str = HOST, port: int = PORT) -> None:
+        self._host = host
+        self._port = port
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -277,7 +279,7 @@ class SynClipReceiver:
         try:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._sock.settimeout(5.0)
-            self._sock.connect((HOST, PORT))
+            self._sock.connect((self._host, self._port))
             self._sock.settimeout(None)
         except OSError as exc:
             self.status = f"Connect failed: {exc}"
@@ -590,7 +592,10 @@ if _IN_BLENDER:
             global _receiver
             if _receiver and _receiver._running:
                 _receiver.disconnect()
-            _receiver = SynClipReceiver()
+            scene = context.scene
+            host = getattr(scene, "synclip_host", HOST) or HOST
+            port = getattr(scene, "synclip_port", PORT)
+            _receiver = SynClipReceiver(host=host, port=port)
             if _receiver.connect():
                 self.report(
                     {"INFO"},
@@ -664,7 +669,9 @@ if _IN_BLENDER:
             else:
                 status = _receiver.status if _receiver else "Disconnected"
                 layout.label(text=status, icon="INFO")
-                layout.label(text=f"Target: {HOST}:{PORT}")
+                col = layout.column(align=True)
+                col.prop(context.scene, "synclip_host", text="Host")
+                col.prop(context.scene, "synclip_port", text="Port")
                 layout.operator("synclip.connect", icon="PLAY")
 
             # --- Separate, manual Track Cleanup section ---
@@ -690,6 +697,19 @@ if _IN_BLENDER:
     def register():
         for cls in _CLASSES:
             bpy.utils.register_class(cls)
+        # Server target, editable in the panel and remembered with the .blend.
+        bpy.types.Scene.synclip_host = bpy.props.StringProperty(
+            name="Host",
+            description="Host/IP of the SynClip capture tool's IPC server",
+            default=HOST,
+        )
+        bpy.types.Scene.synclip_port = bpy.props.IntProperty(
+            name="Port",
+            description="TCP port of the SynClip capture tool's IPC server",
+            default=PORT,
+            min=1,
+            max=65535,
+        )
 
     def unregister():
         # Tear down any live connection so disabling the addon is clean.
@@ -700,6 +720,9 @@ if _IN_BLENDER:
             except Exception:
                 pass
             _receiver = None
+        for prop in ("synclip_host", "synclip_port"):
+            if hasattr(bpy.types.Scene, prop):
+                delattr(bpy.types.Scene, prop)
         for cls in reversed(_CLASSES):
             try:
                 bpy.utils.unregister_class(cls)

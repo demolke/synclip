@@ -26,6 +26,23 @@ _HAS_GLB = os.path.isfile(_GLB)
 # Name mapping (shared with the IPC negotiation rules)
 # ---------------------------------------------------------------------------
 
+def test_view_array_reads_interleaved_stride():
+    """The strided (interleaved) buffer-view path must read the same values as a
+    tightly-packed one, including for the final element (no trailing padding)."""
+    import struct
+    # Two VEC3 float32 vertices interleaved with 4 bytes of padding per 12-byte
+    # item (stride=16); the last item carries no trailing padding.
+    v0 = (1.0, 2.0, 3.0)
+    v1 = (4.0, 5.0, 6.0)
+    buf = (struct.pack("<3f", *v0) + b"\x00\x00\x00\x00"
+           + struct.pack("<3f", *v1))
+    gltf = {"bufferViews": [{"buffer": 0, "byteOffset": 0, "byteStride": 16}]}
+    arr = head_mesh._view_array(gltf, buf, 0, 0, np.float32, 3, 2)
+    assert arr.shape == (2, 3)
+    np.testing.assert_allclose(arr[0], v0)
+    np.testing.assert_allclose(arr[1], v1)
+
+
 def test_normalize_folds_l_r_suffix():
     assert head_mesh.normalize_shape_name("browDown_L") == "browDownLeft"
     assert head_mesh.normalize_shape_name("mouthStretch_R") == "mouthStretchRight"

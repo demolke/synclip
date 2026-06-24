@@ -75,6 +75,24 @@ class _ParamEditor(QWidget):
             self._combo = combo
             lay.addWidget(combo, stretch=1)
 
+        elif spec.kind == "stream":
+            # Choices come from the live track list, not from the spec, so new
+            # backends appear automatically. Keep the current value even if its
+            # stream isn't loaded yet (so a saved config round-trips).
+            lay.addWidget(QLabel(spec.label or spec.name))
+            combo = QComboBox()
+            options = list(streams)
+            if value not in options:
+                options = [value] + options
+            for name in options:
+                combo.addItem(name, name)
+            i = combo.findData(value)
+            if i >= 0:
+                combo.setCurrentIndex(i)
+            combo.activated.connect(self._on_enum)
+            self._combo = combo
+            lay.addWidget(combo, stretch=1)
+
         elif spec.kind == "curve":
             box = QVBoxLayout()
             box.setContentsMargins(0, 0, 0, 0)
@@ -145,6 +163,8 @@ class _ModifierRow(QFrame):
     move_up = Signal(object)
     move_down = Signal(object)
     remove = Signal(object)
+    edit_curve_requested = Signal(object)   # this row wants the docked editor
+    edit_curve_closed = Signal(object)      # this row released the docked editor
 
     def __init__(self, mc: ModifierConfig, streams: list[str], parent=None) -> None:
         super().__init__(parent)
@@ -159,6 +179,7 @@ class _ModifierRow(QFrame):
         cls = mod_mod.get_class(mc.type)
         name = cls.display_name if cls else mc.type
         has_infl = cls.has_influence if cls else True
+        self._has_infl = has_infl
 
         header = QHBoxLayout()
         self._mute = QCheckBox()
@@ -169,15 +190,48 @@ class _ModifierRow(QFrame):
         header.addWidget(QLabel(f"<b>{name}</b>"))
 
         if has_infl:
+            # Animation mode: static value, or a time-varying curve that is a
+            # signed offset on the base (relative) or drives it outright (absolute).
+            self._anim_combo = QComboBox()
+            self._anim_combo.addItem("off", "off")
+            self._anim_combo.addItem("rel", "relative")
+            self._anim_combo.addItem("abs", "absolute")
+            ai = self._anim_combo.findData(mc.influence_anim)
+            self._anim_combo.setCurrentIndex(ai if ai >= 0 else 0)
+            self._anim_combo.setToolTip(
+                "Influence: off (static) / relative (curve offsets the base) / "
+                "absolute (curve drives it)")
+            self._anim_combo.setFixedWidth(52)
+            self._anim_combo.activated.connect(self._on_anim_changed)
+            header.addWidget(self._anim_combo)
+
+            # Base slider + label (used by off and relative).
             self._infl_label = QLabel(f"{mc.influence:.2f}")
-            infl = QSlider(Qt.Orientation.Horizontal)
-            infl.setRange(0, 100)
-            infl.setValue(int(mc.influence * 100))
-            infl.setToolTip("Influence")
-            infl.valueChanged.connect(self._on_influence)
-            header.addWidget(infl, stretch=1)
+            self._infl_slider = QSlider(Qt.Orientation.Horizontal)
+            self._infl_slider.setRange(0, 100)
+            self._infl_slider.setValue(int(mc.influence * 100))
+            self._infl_slider.setToolTip("Influence (base)")
+            self._infl_slider.valueChanged.connect(self._on_influence)
+            header.addWidget(self._infl_slider, stretch=1)
             header.addWidget(self._infl_label)
+
+            # Live read-only readout (absolute mode: the curve owns the value).
+            self._readout = QLabel("–")
+            self._readout.setToolTip("Live influence (driven by the curve)")
+            self._readout.setStyleSheet("color:#9cf;")
+            header.addWidget(self._readout, stretch=1)
+
+            # Toggles the shared curve editor docked under the timeline.
+            self._curve_btn = QPushButton("∿")
+            self._curve_btn.setCheckable(True)
+            self._curve_btn.setFixedWidth(26)
+            self._curve_btn.setToolTip("Edit influence curve (shown under the timeline)")
+            self._curve_btn.toggled.connect(self._on_curve_btn)
+            header.addWidget(self._curve_btn)
+            self._update_influence_mode_ui()
         else:
+            self._anim_combo = self._infl_slider = self._infl_label = None
+            self._readout = self._curve_btn = None
             header.addStretch(1)
 
         self._edit_btn = QPushButton("E")
@@ -227,6 +281,54 @@ class _ModifierRow(QFrame):
         self._infl_label.setText(f"{self.mc.influence:.2f}")
         self.changed.emit()
 
+    def _on_anim_changed(self, _i: int) -> None:
+        new = self._anim_combo.currentData()
+        if new == self.mc.influence_anim:
+            return
+        self.mc.influence_anim = new
+        # The stored curve means different things per mode (signed offset vs.
+        # absolute level), so re-seed it to the new mode's neutral rather than
+        # reinterpret it: relative -> flat 0; absolute -> flat at the base.
+        if new == "relative":
+            self.mc.influence_curve = [[0.0, 0.0], [1.0, 0.0]]
+        elif new == "absolute":
+            b = self.mc.influence
+            self.mc.influence_curve = [[0.0, b], [1.0, b]]
+        self._update_influence_mode_ui()
+        # If this row owns the docked editor, re-bind so its range/curve refresh.
+        if self._curve_btn.isChecked():
+            if new == "off":
+                self._curve_btn.setChecked(False)   # emits edit_curve_closed
+            else:
+                self.edit_curve_requested.emit(self)
+        self.changed.emit()
+
+    def _on_curve_btn(self, checked: bool) -> None:
+        (self.edit_curve_requested if checked else self.edit_curve_closed).emit(self)
+
+    def _update_influence_mode_ui(self) -> None:
+        """Show base slider (off/relative) vs. live readout (absolute); the curve
+        button only when animated."""
+        anim = self.mc.influence_anim
+        is_abs = anim == "absolute"
+        self._infl_slider.setVisible(not is_abs)
+        self._infl_label.setVisible(not is_abs)
+        self._readout.setVisible(is_abs)
+        self._curve_btn.setVisible(anim != "off")
+
+    def set_influence_readout(self, value: float) -> None:
+        """Push the live effective influence (shown only in absolute mode)."""
+        if self._has_infl and self._readout is not None:
+            self._readout.setText(f"{value:.2f}")
+
+    def set_curve_editing(self, on: bool) -> None:
+        """Reflect docked-editor ownership without re-emitting (single-active)."""
+        if self._curve_btn is None or self._curve_btn.isChecked() == on:
+            return
+        self._curve_btn.blockSignals(True)
+        self._curve_btn.setChecked(on)
+        self._curve_btn.blockSignals(False)
+
     def _on_edit_toggled(self, checked: bool) -> None:
         self._body.setVisible(checked)
 
@@ -241,11 +343,17 @@ class ModifierStackWidget(QWidget):
     """Source selector + the ordered modifier rows for one view."""
 
     changed = Signal()   # config mutated; host re-applies pipeline + refreshes
+    # The modifier whose influence curve should be shown in the docked editor,
+    # or None to close it.
+    influence_curve_selected = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._cfg = None
-        self._streams = ["mediapipe", "ai", "retarget"]
+        self._curve_row: _ModifierRow | None = None
+        # The base track is always present; the rest are pushed in dynamically
+        # via set_available_streams() from the live stream store.
+        self._streams = ["mediapipe"]
         self._lay = QVBoxLayout(self)
         self._lay.setContentsMargins(2, 2, 2, 2)
         self._lay.setSpacing(3)
@@ -263,7 +371,14 @@ class ModifierStackWidget(QWidget):
         self._rows: list[_ModifierRow] = []
 
     def set_available_streams(self, names: list[str]) -> None:
-        self._streams = list(names)
+        """Update the track list offered by stream selectors. Rebuilds the rows
+        (so open combos refresh) only when the set actually changed."""
+        names = list(names)
+        if names == self._streams:
+            return
+        self._streams = names
+        if self._cfg is not None:
+            self._rebuild_rows()
 
     def bind(self, view_config) -> None:
         """Bind to a ViewConfig and rebuild the rows."""
@@ -274,9 +389,23 @@ class ModifierStackWidget(QWidget):
         if 0 <= index < len(self._rows):
             self._rows[index].set_status(text)
 
+    def set_row_influence(self, index: int, value: float) -> None:
+        """Push a modifier's live effective influence to its row readout."""
+        if 0 <= index < len(self._rows):
+            self._rows[index].set_influence_readout(value)
+
+    def clear_curve_editing(self) -> None:
+        """Drop docked-editor ownership (e.g. the editor panel was closed). Does
+        not re-emit ``influence_curve_selected`` (the caller already knows)."""
+        if self._curve_row is not None:
+            self._curve_row.set_curve_editing(False)
+            self._curve_row = None
+
     # -- internals ----------------------------------------------------------
 
     def _rebuild_rows(self) -> None:
+        had_active = self._curve_row is not None
+        self._curve_row = None
         for row in self._rows:
             row.setParent(None)
             row.deleteLater()
@@ -289,8 +418,26 @@ class ModifierStackWidget(QWidget):
             row.move_up.connect(self._on_move_up)
             row.move_down.connect(self._on_move_down)
             row.remove.connect(self._on_remove)
+            row.edit_curve_requested.connect(self._on_edit_curve_requested)
+            row.edit_curve_closed.connect(self._on_edit_curve_closed)
             self._rows_lay.addWidget(row)
             self._rows.append(row)
+        # The rows that may have owned the docked editor were just destroyed, so
+        # close it (the bound config may also have changed entirely).
+        if had_active:
+            self.influence_curve_selected.emit(None)
+
+    def _on_edit_curve_requested(self, row: _ModifierRow) -> None:
+        for r in self._rows:
+            if r is not row:
+                r.set_curve_editing(False)
+        self._curve_row = row
+        self.influence_curve_selected.emit(row.mc)
+
+    def _on_edit_curve_closed(self, row: _ModifierRow) -> None:
+        if self._curve_row is row:
+            self._curve_row = None
+            self.influence_curve_selected.emit(None)
 
     def _on_add_clicked(self) -> None:
         menu = QMenu(self)

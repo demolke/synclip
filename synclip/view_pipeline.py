@@ -103,13 +103,17 @@ class ViewPipeline:
         return out
 
     def process(self, streams: dict[str, list[float] | None],
-                pose: dict | None = None, pos_ms: float = 0.0
+                pose: dict | None = None, pos_ms: float = 0.0,
+                duration_ms: float = 0.0
                 ) -> tuple[list[float], dict | None]:
         """Run the full stack: pick the source stream, apply every enabled
-        modifier in order.  Returns (final blendshapes, final pose)."""
+        modifier in order.  Returns (final blendshapes, final pose).
+
+        *duration_ms* is the full clip length, used by modifiers with a
+        time-varying influence curve; 0 disables that (e.g. LIVE)."""
         values = [0.0] * 52
         out_pose = pose
-        ctx = ModifierContext(streams=streams, pos_ms=pos_ms)
+        ctx = ModifierContext(streams=streams, pos_ms=pos_ms, duration_ms=duration_ms)
         for mc, m in zip(self.config.modifiers, self._modifiers):
             if not mc.enabled:
                 continue
@@ -137,6 +141,9 @@ class ViewPipeline:
         self.set_streams(stream_frames)
         self.reset()
 
+        # Clip length for time-varying influence curves (last take position).
+        duration_ms = take_stream.positions[-1] if take_stream.positions else 0.0
+
         out: list[dict] = []
         for frame in take_stream.frames:
             pos = float(frame.get("audio_position_ms", 0.0))
@@ -144,6 +151,7 @@ class ViewPipeline:
                 "mediapipe": list(frame["blendshapes"]),
                 **{name: s.values_at(pos) for name, s in named_streams.items()},
             }
-            weights, _ = self.process(point_streams, frame.get("head_pose"), pos)
+            weights, _ = self.process(point_streams, frame.get("head_pose"), pos,
+                                      duration_ms)
             out.append({"audio_position_ms": pos, "blendshapes": weights})
         return out

@@ -50,16 +50,41 @@ def _make_ai() -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def test_combo_has_mediapipe_not_raw(qapp, tmp_path):
-    """The combo should label the camera source 'Mediapipe', not 'Raw'."""
+def test_arbitrary_stream_is_discovered_everywhere(qapp, tmp_path):
+    """An arbitrary, never-hardcoded track name must surface in the bottom panel
+    selector AND the input-modifier stream picker, purely from the stream store
+    -- proving nothing downstream is hardcoded to specific backends."""
+    from synclip.ui.main_window import MainWindow
+    w = MainWindow(root_dir=str(tmp_path), ipc_port=0)
+    try:
+        w._streams.set("totally_new_backend",
+                       [{"audio_position_ms": 0.0, "blendshapes": [0.4] * 52}])
+        w._update_bars_source_combo()
+        w._update_pipeline_streams()
+
+        # Bottom editor panel: the track appears (humanised label) and is selectable.
+        combo = w._bars_source_combo
+        datas = [combo.itemData(i) for i in range(combo.count())]
+        assert "totally_new_backend" in datas
+
+        # Input modifier picker: the available streams include it dynamically.
+        assert "totally_new_backend" in w._modifier_stack._streams
+        assert w._track_names()[0] == "mediapipe"  # base track stays first
+    finally:
+        w._worker.stop()
+
+
+def test_combo_lists_tracks_by_name(qapp, tmp_path):
+    """The combo lists tracks by their raw stream name (no nice-name mapping),
+    plus the fixed 'mix' output entry."""
     from synclip.ui.main_window import MainWindow
     w = MainWindow(root_dir=str(tmp_path), ipc_port=0)
     try:
         combo = w._bars_source_combo
         labels = [combo.itemText(i) for i in range(combo.count())]
-        assert any("Mediapipe" in t for t in labels), f"Labels: {labels}"
+        assert "mediapipe" in labels, f"Labels: {labels}"
+        assert "mix" in labels, f"Labels: {labels}"
         assert not any("Raw" in t for t in labels), f"Labels: {labels}"
-        assert any("Mix" in t for t in labels), f"Labels: {labels}"
     finally:
         w._worker.stop()
 
@@ -125,34 +150,44 @@ def test_mix_source_shows_pipeline_output(qapp, tmp_path):
         w._worker.stop()
 
 
-def _write_synclip_with_ai_frames(audio_path: str, ai_values: list[float]) -> None:
-    """Write a minimal .synclip.json next to *audio_path* with one AI frame."""
+def _write_synclip_with_ai_take(audio_path: str, ai_values: list[float]) -> None:
+    """Write a .synclip.json with one take whose streams hold mediapipe + ai."""
     import json, pathlib
     synclip = {
-        "schema_version": "1.0",
-        "takes": [],
-        "default_take": None,
-        "ai_frames": [{"audio_position_ms": 0.0, "blendshapes": ai_values}],
+        "version": "1.0",
+        "default_take": "take_001",
+        "takes": [{
+            "take_id": "take_001",
+            "is_default": True,
+            "capture_settings": {},
+            "streams": {
+                "mediapipe": [{"audio_position_ms": 0.0, "blendshapes": [0.0] * 52}],
+                "ai": [{"audio_position_ms": 0.0, "blendshapes": ai_values}],
+            },
+        }],
     }
     p = pathlib.Path(audio_path)
     out = p.parent / (p.stem + ".synclip.json")
     out.write_text(json.dumps(synclip))
 
 
-def test_ai_frames_restored_from_json_shown_in_bars(qapp, tmp_path):
-    """AI frames persisted in synclip JSON must appear in bars when source is 'ai'."""
+def test_ai_frames_restored_from_take_shown_in_bars(qapp, tmp_path):
+    """AI frames persisted inside a take must appear in bars when source='ai'."""
     from synclip.ui.main_window import MainWindow
+    from synclip import data as data_mod
 
-    # Write a fake audio file and a synclip JSON with AI frames.
+    # Write a fake audio file and a synclip JSON with a take carrying ai frames.
     audio_path = str(tmp_path / "test.ogg")
     pathlib.Path(audio_path).touch()
     ai_values = [float(i % 10) / 10.0 for i in range(52)]
-    _write_synclip_with_ai_frames(audio_path, ai_values)
+    _write_synclip_with_ai_take(audio_path, ai_values)
 
     w = MainWindow(root_dir=str(tmp_path), ipc_port=0)
     try:
-        # Simulate loading the audio file - this calls _try_restore_ai_frames.
-        w._try_restore_ai_frames(audio_path)
+        # Loading the take pulls all its streams into the live set.
+        w._current_audio_path = audio_path
+        w._current_synclip = data_mod.load_synclip(audio_path)
+        w._set_current_take_by_id("take_001")
 
         # AI frames combo item must have been added.
         combo = w._bars_source_combo
@@ -221,6 +256,32 @@ def test_ai_edit_does_not_touch_take_frames(qapp, tmp_path):
         assert w._streams.frames("ai")[0]["blendshapes"][25] == pytest.approx(0.7)
         assert w._streams.frames("mediapipe")[0]["blendshapes"][25] == pytest.approx(0.0), \
             "AI edit must not modify take frames"
+    finally:
+        w._worker.stop()
+
+
+def test_edit_routes_to_any_named_track_not_just_ai(qapp, tmp_path):
+    """Editing must write to whichever track is selected -- including a brand new
+    backend name -- and must NOT fall through to the mediapipe take."""
+    from synclip.ui.main_window import MainWindow
+
+    w = MainWindow(root_dir=str(tmp_path), ipc_port=0)
+    try:
+        w._streams.set("mediapipe", [
+            {"audio_position_ms": 0.0, "blendshapes": [0.0] * 52,
+             "head_pose": {"rot": [0.0] * 3, "pos": [0.0] * 3}},
+        ])
+        w._streams.set("rhubarb", [{"audio_position_ms": 0.0, "blendshapes": [0.0] * 52}])
+        w._current_audio_path = str(tmp_path / "clip.ogg")
+        w._update_bars_source_combo()
+        _select_source(w, "rhubarb")
+
+        w._on_value_edited(25, 0.6)
+
+        assert w._streams.frames("rhubarb")[0]["blendshapes"][25] == pytest.approx(0.6), \
+            "Edit must write to the selected track"
+        assert w._streams.frames("mediapipe")[0]["blendshapes"][25] == pytest.approx(0.0), \
+            "Edit on a named track must not corrupt the take"
     finally:
         w._worker.stop()
 
@@ -455,7 +516,7 @@ def test_save_timer_flushed_on_close(qapp, tmp_path):
         assert not w._save_timer.isActive(), "timer must be stopped after close"
         saved = ld.load_synclip(audio_path)
         assert saved is not None
-        saved_frames = saved["takes"][0]["frames"]
+        saved_frames = saved["takes"][0]["streams"]["mediapipe"]
         assert saved_frames[0]["blendshapes"][25] == pytest.approx(0.9), \
             "pending edit must be flushed to disk on close"
     finally:
