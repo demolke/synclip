@@ -21,7 +21,7 @@ import os
 from .arkit_names import BLENDSHAPE_NAMES
 
 # Where to find the model weights (override with SYNCLIP_AI_MODEL).
-MODEL_PATH = os.environ.get("SYNCLIP_AI_MODEL", "utils/model/model.pth")
+MODEL_PATH = os.environ.get("SYNCLIP_AI_MODEL", "synclip/utils/model/model.pth")
 
 # The model's output channel order (from the reference script). Names that match
 # our ARKit-52 set are mapped; the rest (tongueOut, head*/eye* rotations) drop.
