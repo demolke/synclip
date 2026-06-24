@@ -120,15 +120,23 @@ def test_base_modifier_status_text_empty():
 # Animated (time-varying) influence
 # ---------------------------------------------------------------------------
 
-def test_sample_curve_is_piecewise_linear_and_unclamped():
+def test_sample_curve_is_smooth_and_unclamped():
     from ..curve_lut import sample_curve
     pts = [[0.0, -1.0], [0.5, 1.0], [1.0, 0.0]]
-    assert sample_curve(pts, 0.0) == -1.0          # endpoint
+    assert sample_curve(pts, 0.0) == -1.0          # passes through control points
     assert sample_curve(pts, 0.5) == 1.0           # peak (non-monotone, no clamp)
-    assert abs(sample_curve(pts, 0.25) - 0.0) < 1e-9   # midway -1 -> 1
-    assert abs(sample_curve(pts, 0.75) - 0.5) < 1e-9   # midway 1 -> 0
+    assert sample_curve(pts, 1.0) == 0.0
     assert sample_curve(pts, 2.0) == 0.0           # past the end holds last y
     assert sample_curve([], 0.5) == 0.0
+    # Negative y is preserved (no clamp), unlike the response-curve LUT.
+    assert sample_curve(pts, 0.1) < 0.0
+
+
+def test_sample_curve_two_points_is_linear():
+    from ..curve_lut import sample_curve
+    pts = [[0.0, 0.0], [1.0, 1.0]]
+    assert abs(sample_curve(pts, 0.25) - 0.25) < 1e-9   # spline reduces to a line
+    assert abs(sample_curve(pts, 0.5) - 0.5) < 1e-9
 
 
 def test_effective_influence_off_returns_static():

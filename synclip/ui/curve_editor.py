@@ -152,11 +152,13 @@ class CurveEditor(QWidget):
         # The curve itself.
         p.setPen(QPen(QColor(120, 200, 120), 2))
         if self._eval_mode == "animation":
-            # Piecewise-linear straight through the control points (matches
-            # sample_curve), so no monotone-LUT assumptions.
-            pts = sorted(self._points)
+            # Densely sample the same smooth spline the engine applies
+            # (sample_curve), so the drawn curve matches the result.
+            n = 96
             prev = None
-            for (x, y) in pts:
+            for j in range(n):
+                x = j / (n - 1)
+                y = sample_curve(self._points, x)
                 pt = self._to_px(x, y)
                 if prev is not None:
                     p.drawLine(prev, pt)

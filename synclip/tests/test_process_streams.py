@@ -125,3 +125,30 @@ def test_rhubarb_track_added_during_process(qapp, tmp_path):
         assert frames and all(len(f["blendshapes"]) == 52 for f in frames)
     finally:
         w._worker.stop()
+
+
+def test_rhubarb_gets_extracted_audio_not_video(qapp, tmp_path, monkeypatch):
+    """For a video source, rhubarb must be fed the extracted OGG, not the video
+    container (rhubarb only reads WAV/OGG)."""
+    from synclip.ui.main_window import MainWindow
+    video = str(tmp_path / "clip.mp4")
+    audio_ogg = str(tmp_path / "clip.ogg")
+    open(video, "wb").close()
+    open(audio_ogg, "wb").close()
+
+    w = MainWindow(root_dir=str(tmp_path), ipc_port=0)
+    try:
+        # _current_audio_path is the video container; the played/processed audio
+        # is the extracted OGG (what _load_video_file sets up).
+        _enter_process(w, video)
+        w._video_audio_path = audio_ogg
+
+        captured: dict = {}
+        monkeypatch.setattr(w, "_generate_rhubarb_stream",
+                            lambda path, dur: captured.update(path=path))
+        w._on_process_finished([])
+
+        assert captured.get("path") == audio_ogg, (
+            f"rhubarb got {captured.get('path')!r}, expected the extracted OGG")
+    finally:
+        w._worker.stop()

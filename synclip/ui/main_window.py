@@ -978,13 +978,21 @@ class MainWindow(QMainWindow):
         if self._sm.mode in (Mode.REVIEW, Mode.LIVE):
             self._on_toggle_pause()
 
+    # Transport row geometry, reused to line the influence-curve editor up with
+    # the timeline slider (same width, same x-extent -> playhead matches scrub).
+    _TRANSPORT_MARGIN = 4
+    _TRANSPORT_SPACING = 6
+    _PAUSE_BTN_W = 90
+    _TIME_LABEL_W = 110
+
     def _build_transport(self) -> QWidget:
         row = QWidget(self)
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setContentsMargins(self._TRANSPORT_MARGIN, 0, self._TRANSPORT_MARGIN, 0)
+        layout.setSpacing(self._TRANSPORT_SPACING)
 
         self._pause_btn = QPushButton("Pause", row)
-        self._pause_btn.setFixedWidth(90)
+        self._pause_btn.setFixedWidth(self._PAUSE_BTN_W)
         self._pause_btn.clicked.connect(self._on_toggle_pause)
         layout.addWidget(self._pause_btn)
 
@@ -997,7 +1005,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._timeline, stretch=1)
 
         self._time_label = QLabel("0.0 / 0.0 s", row)
-        self._time_label.setFixedWidth(110)
+        self._time_label.setFixedWidth(self._TIME_LABEL_W)
         layout.addWidget(self._time_label)
         return row
 
@@ -1027,10 +1035,14 @@ class MainWindow(QMainWindow):
         lay.addLayout(head)
 
         # The CurveEditor is rebuilt per binding (its y-range/reference depend on
-        # the mode), so it lives in a swappable host.
+        # the mode), so it lives in a swappable host. Inset the host so the curve
+        # lines up horizontally with the timeline slider above it (the slider is
+        # flanked by the Pause button and the time label).
         self._infl_curve_host = QWidget(panel)
         self._infl_curve_host_lay = QVBoxLayout(self._infl_curve_host)
-        self._infl_curve_host_lay.setContentsMargins(0, 0, 0, 0)
+        left_inset = self._TRANSPORT_MARGIN + self._PAUSE_BTN_W + self._TRANSPORT_SPACING
+        right_inset = self._TRANSPORT_MARGIN + self._TIME_LABEL_W + self._TRANSPORT_SPACING
+        self._infl_curve_host_lay.setContentsMargins(left_inset, 0, right_inset, 0)
         self._infl_curve_host.setMinimumHeight(120)
         lay.addWidget(self._infl_curve_host)
 
@@ -2158,7 +2170,9 @@ class MainWindow(QMainWindow):
         else:
             print("[main_window] AI stream: generator returned no frames")
         # Rhubarb viseme track (optional, offline) generated during Process.
-        self._generate_rhubarb_stream(self._current_audio_path, audio_duration_ms)
+        # Feed it the actual audio file (the extracted OGG for a video source),
+        # never the video container -- rhubarb only reads WAV/OGG.
+        self._generate_rhubarb_stream(self._playback_audio_path(), audio_duration_ms)
         # Persist every generated track into the take in one write.
         self._save_current_take()
         if new_take_id:
