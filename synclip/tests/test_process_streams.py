@@ -127,6 +127,38 @@ def test_rhubarb_track_added_during_process(qapp, tmp_path):
         w._worker.stop()
 
 
+def test_bake_mix_creates_track_and_keeps_modifiers(qapp, tmp_path):
+    """The Bake button snapshots the selected view's mix into a new track while
+    leaving the view's modifiers in place."""
+    from synclip.ui.main_window import MainWindow
+    from synclip.modifiers import ModifierConfig
+
+    w = MainWindow(root_dir=str(tmp_path), ipc_port=0)
+    try:
+        frames = [
+            {"audio_position_ms": 0.0, "blendshapes": [0.2] * 52},
+            {"audio_position_ms": 500.0, "blendshapes": [0.6] * 52},
+            {"audio_position_ms": 1000.0, "blendshapes": [0.4] * 52},
+        ]
+        w._streams.set("mediapipe", frames)
+        cfg = w._views[w._selected_view]
+        cfg.modifiers = [ModifierConfig("smooth", influence=0.5)]
+        before = [m.to_dict() for m in cfg.modifiers]
+
+        w._on_bake_mix()
+
+        assert w._streams.has("baked"), "bake did not create a track"
+        assert len(w._streams.frames("baked")) == len(frames)
+        # Baking must not touch the modifiers.
+        assert [m.to_dict() for m in cfg.modifiers] == before
+
+        # A second bake makes a uniquely-named track, not a clobber.
+        w._on_bake_mix()
+        assert w._streams.has("baked_2")
+    finally:
+        w._worker.stop()
+
+
 def test_rhubarb_gets_extracted_audio_not_video(qapp, tmp_path, monkeypatch):
     """For a video source, rhubarb must be fed the extracted OGG, not the video
     container (rhubarb only reads WAV/OGG)."""

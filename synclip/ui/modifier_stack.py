@@ -228,7 +228,6 @@ class _ModifierRow(QFrame):
             self._curve_btn.setToolTip("Edit influence curve (shown under the timeline)")
             self._curve_btn.toggled.connect(self._on_curve_btn)
             header.addWidget(self._curve_btn)
-            self._update_influence_mode_ui()
         else:
             self._anim_combo = self._infl_slider = self._infl_label = None
             self._readout = self._curve_btn = None
@@ -250,6 +249,11 @@ class _ModifierRow(QFrame):
         rm.clicked.connect(lambda: self.remove.emit(self))
         header.addWidget(rm)
         outer.addLayout(header)
+        # Set per-mode visibility only AFTER the header is installed on the row.
+        # Calling setVisible() on the still-parentless slider/label/readout would
+        # briefly show each as its own top-level window (a popup at screen center).
+        if has_infl:
+            self._update_influence_mode_ui()
 
         # Collapsible editor body built from the modifier's param specs.
         self._body = QWidget(self)
@@ -407,6 +411,10 @@ class ModifierStackWidget(QWidget):
         had_active = self._curve_row is not None
         self._curve_row = None
         for row in self._rows:
+            # hide() before setParent(None): reparenting a *visible* widget to
+            # None turns it into a top-level window for a frame (a flashing
+            # popup) before deleteLater() destroys it.
+            row.hide()
             row.setParent(None)
             row.deleteLater()
         self._rows = []

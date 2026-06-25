@@ -1061,6 +1061,7 @@ class MainWindow(QMainWindow):
     def _bind_influence_editor(self, mc) -> None:
         from .curve_editor import CurveEditor
         if self._influence_editor is not None:
+            self._influence_editor.hide()
             self._influence_editor.setParent(None)
             self._influence_editor.deleteLater()
             self._influence_editor = None
@@ -1097,6 +1098,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_modifier_stack"):
             self._modifier_stack.clear_curve_editing()
         if self._influence_editor is not None:
+            self._influence_editor.hide()
             self._influence_editor.setParent(None)
             self._influence_editor.deleteLater()
             self._influence_editor = None
@@ -1346,6 +1348,12 @@ class MainWindow(QMainWindow):
         self._export_glb_btn.setToolTip("Export this view's processed animation as a GLB file")
         self._export_glb_btn.clicked.connect(self._on_save_as_glb)
         btn_row.addWidget(self._export_glb_btn)
+        self._bake_btn = QPushButton("Bake Mix", panel)
+        self._bake_btn.setToolTip(
+            "Bake this view's current mix (modifier output) into a new track. "
+            "The modifiers are kept as-is.")
+        self._bake_btn.clicked.connect(self._on_bake_mix)
+        btn_row.addWidget(self._bake_btn)
         vbox.addLayout(btn_row)
 
         # Preset row.
@@ -1634,6 +1642,48 @@ class MainWindow(QMainWindow):
             return
         self._statusbar.showMessage(
             f"Saved '{os.path.basename(out_path)}' ({n_keys} keyframes).", 5000)
+
+    def _unique_track_name(self, base: str) -> str:
+        """A track name not yet in use: ``base``, then ``base_2``, ``base_3``..."""
+        existing = set(self._streams.names())
+        if base not in existing:
+            return base
+        i = 2
+        while f"{base}_{i}" in existing:
+            i += 1
+        return f"{base}_{i}"
+
+    def _on_bake_mix(self) -> None:
+        """Bake the selected view's current mix (the modifier-stack output) over
+        the whole take into a new track. Modifiers are left untouched, so the
+        baked track is just a snapshot that can itself feed another view/mixer."""
+        if not self._streams.has("mediapipe"):
+            self._statusbar.showMessage(
+                "Bake needs a loaded take (record/process or open one first).", 4000)
+            return
+        cfg = self._views[self._selected_view]
+        # A fresh pipeline so baking doesn't disturb the live preview's temporal
+        # (smoothing) state.
+        pipe = ViewPipeline(cfg)
+        mp = self._streams.get("mediapipe")
+        take_stream = Stream(mp.frames, mp.positions) if mp else Stream()
+        named_streams = {
+            name: Stream(s.frames, s.positions)
+            for name, s in ((n, self._streams.get(n)) for n in self._streams.names())
+            if name != "mediapipe" and s is not None
+        }
+        out_frames = pipe.process_all(take_stream, named_streams)
+        if not out_frames:
+            self._statusbar.showMessage("Bake produced no frames.", 4000)
+            return
+        name = self._unique_track_name("baked")
+        self._streams.set(name, out_frames)
+        self._update_bars_source_combo()
+        self._update_pipeline_streams()
+        self._save_current_take()
+        self._statusbar.showMessage(
+            f"Baked '{cfg.label}' mix into track '{name}' ({len(out_frames)} frames).",
+            5000)
 
     # ==================================================================
     # Menus
