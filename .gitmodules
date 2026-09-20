@@ -1,0 +1,3 @@
+[submodule "synclip/gnm"]
+	path = synclip/gnm
+	url = git@github.com:google/GNM.git
