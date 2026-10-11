@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import functools
+import json
 import os
 import pathlib
+import re
 import sys
 import time
 import traceback
@@ -16,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDockWidget,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -494,6 +498,8 @@ def _add_float_slider(
     hi: float,
     on_change,
     tooltip: str | None = None,
+    on_press=None,
+    on_release=None,
 ) -> QSlider:
     """Add one label + slider + value row to *layout*; returns the QSlider
     (float range [lo, hi] mapped onto an int slider, same convention as
@@ -525,6 +531,10 @@ def _add_float_slider(
         on_change(val)
 
     slider.valueChanged.connect(_on_value)
+    if on_press is not None:
+        slider.sliderPressed.connect(on_press)
+    if on_release is not None:
+        slider.sliderReleased.connect(on_release)
 
     row_lay.addWidget(name_lbl)
     row_lay.addWidget(slider, stretch=1)
@@ -546,9 +556,25 @@ def _hline() -> QFrame:
     return line
 
 
+def _undoable(fn):
+    """Wrap a no-argument window action so that, if it changes any GNM
+    parameter, the pre-action state is recorded as one undo step."""
+    @functools.wraps(fn)
+    def wrapper(self):
+        self._commit_pending()
+        before = self._snapshot()
+        fn(self)
+        self._record_if_changed(before)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
+
+_UNDO_LIMIT = 1000
+_COMMIT_DELAY_MS = 500   # coalesces wheel / keyboard / click slider changes
+_SAVE_FIRST_INDEX = 0    # numbering starts here: prefix_0000.json
 
 class GNMHeadViewerWindow(QMainWindow):
     def __init__(self) -> None:
@@ -579,6 +605,18 @@ class GNMHeadViewerWindow(QMainWindow):
         self._trans_sliders: dict[int, QSlider] = {}
 
         self._dim_to_facs = self._build_dim_to_facs()
+
+        # Undo / redo: snapshots of (identity, expression, rotations,
+        # translation). A slider drag or a burst of wheel/key changes is
+        # collapsed into one step via _pending (state before the gesture).
+        self._undo_stack: list[tuple] = []
+        self._redo_stack: list[tuple] = []
+        self._pending: tuple | None = None
+        self._slider_down = False
+        self._commit_timer = QTimer(self)
+        self._commit_timer.setSingleShot(True)
+        self._commit_timer.setInterval(_COMMIT_DELAY_MS)
+        self._commit_timer.timeout.connect(self._commit_pending)
 
         # --- Viewport (central widget) -----------------------------------
         if OPENGL_AVAILABLE:
@@ -646,6 +684,7 @@ class GNMHeadViewerWindow(QMainWindow):
         outer.addWidget(self._build_info_box())
         outer.addWidget(self._build_view_controls_box())
         outer.addWidget(self._build_reset_box())
+        outer.addWidget(self._build_save_box())
         outer.addWidget(self._build_export_box())
         outer.addWidget(_hline())
 
@@ -742,12 +781,39 @@ class GNMHeadViewerWindow(QMainWindow):
         box = QWidget()
         lay = QHBoxLayout(box)
         lay.setContentsMargins(0, 0, 0, 0)
+        self.btn_undo = QPushButton("Undo [Ctrl+Z]")
+        self.btn_undo.clicked.connect(self._on_undo)
+        self.btn_redo = QPushButton("Redo [Ctrl+Y]")
+        self.btn_redo.clicked.connect(self._on_redo)
         btn_reset_params = QPushButton("Reset Params")
         btn_reset_params.clicked.connect(self._on_reset_params)
         btn_randomize = QPushButton("Randomize")
         btn_randomize.clicked.connect(self._on_randomize)
-        lay.addWidget(btn_reset_params)
-        lay.addWidget(btn_randomize)
+        for b in (self.btn_undo, self.btn_redo, btn_reset_params, btn_randomize):
+            lay.addWidget(b)
+        self._update_undo_buttons()
+        return box
+
+    def _build_save_box(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(QLabel("Save / load parameters (JSON) - prefix_NNNN.json"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Prefix"))
+        self.save_prefix_edit = QLineEdit("gnm_params")
+        self.save_prefix_edit.setToolTip(
+            "Saved to the current working directory as <prefix>_0000.json, "
+            "using the first unused number."
+        )
+        row.addWidget(self.save_prefix_edit, stretch=1)
+        btn_save = QPushButton("Save [Ctrl+S]")
+        btn_save.clicked.connect(self._on_save)
+        row.addWidget(btn_save)
+        btn_load = QPushButton("Load [Ctrl+O]")
+        btn_load.clicked.connect(self._on_load)
+        row.addWidget(btn_load)
+        lay.addLayout(row)
         return box
 
     def _build_export_box(self) -> QWidget:
@@ -799,6 +865,8 @@ class GNMHeadViewerWindow(QMainWindow):
                         sub_layout, f"ID {i}", float(self.identity[i]),
                         -3.0, 3.0,
                         lambda val, i=i: self._on_identity_changed(i, val),
+                        on_press=self._on_slider_pressed,
+                        on_release=self._on_slider_released,
                     )
                     self._id_sliders[i] = slider
             layout.addWidget(CollapsibleSection(group_name, build_group))
@@ -831,6 +899,8 @@ class GNMHeadViewerWindow(QMainWindow):
                         -3.0, 3.0,
                         lambda val, i=i: self._on_expression_changed(i, val),
                         tooltip=tooltip,
+                        on_press=self._on_slider_pressed,
+                        on_release=self._on_slider_released,
                     )
                     self._ex_sliders[i] = slider
             layout.addWidget(CollapsibleSection(group_name, build_group))
@@ -846,6 +916,8 @@ class GNMHeadViewerWindow(QMainWindow):
                         sub_layout, f"{name} {axis_label}",
                         float(self.rotations[j, axis]), -1.5, 1.5,
                         lambda val, j=j, axis=axis: self._on_pose_changed(j, axis, val),
+                        on_press=self._on_slider_pressed,
+                        on_release=self._on_slider_released,
                     )
                     self._pose_sliders[(j, axis)] = slider
             layout.addWidget(CollapsibleSection(name, build_joint))
@@ -855,6 +927,8 @@ class GNMHeadViewerWindow(QMainWindow):
             slider = _add_float_slider(
                 layout, axis_label, float(self.translation[i]), -0.3, 0.3,
                 lambda val, i=i: self._on_translation_changed(i, val),
+                on_press=self._on_slider_pressed,
+                on_release=self._on_slider_released,
             )
             self._trans_sliders[i] = slider
 
@@ -901,26 +975,211 @@ class GNMHeadViewerWindow(QMainWindow):
         QShortcut(QKeySequence("D"), self, activated=self.chk_debug_tri.toggle)
         QShortcut(QKeySequence("W"), self, activated=self.chk_wireframe.toggle)
         QShortcut(QKeySequence("G"), self, activated=self.chk_grid.toggle)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._on_save)
+        QShortcut(QKeySequence("Ctrl+O"), self, activated=self._on_load)
+        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._on_undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self, activated=self._on_redo)
 
     # ------------------------------------------------------------------
     # Slider callbacks
     # ------------------------------------------------------------------
 
     def _on_identity_changed(self, i: int, val: float) -> None:
+        self._begin_change()
         self.identity[i] = val
         self._mark_dirty()
 
     def _on_expression_changed(self, i: int, val: float) -> None:
+        self._begin_change()
         self.expression[i] = val
         self._mark_dirty()
 
     def _on_pose_changed(self, j: int, axis: int, val: float) -> None:
+        self._begin_change()
         self.rotations[j, axis] = val
         self._mark_dirty()
 
     def _on_translation_changed(self, i: int, val: float) -> None:
+        self._begin_change()
         self.translation[i] = val
         self._mark_dirty()
+
+    # ------------------------------------------------------------------
+    # Undo / redo
+    # ------------------------------------------------------------------
+
+    def _snapshot(self) -> tuple:
+        return (
+            self.identity.copy(), self.expression.copy(),
+            self.rotations.copy(), self.translation.copy(),
+        )
+
+    @staticmethod
+    def _snap_equal(a: tuple, b: tuple) -> bool:
+        return all(np.array_equal(x, y) for x, y in zip(a, b))
+
+    def _restore(self, snap: tuple) -> None:
+        self.identity[:] = snap[0]
+        self.expression[:] = snap[1]
+        self.rotations[:] = snap[2]
+        self.translation[:] = snap[3]
+        self._sync_all_sliders()
+        self._mark_dirty()
+
+    def _begin_change(self) -> None:
+        """Called *before* a slider mutates the params. Remembers the state
+        at the start of the gesture; the step is committed when the slider is
+        released, or after a short idle delay for wheel/key/click changes."""
+        if self._pending is None:
+            self._pending = self._snapshot()
+        if not self._slider_down:
+            self._commit_timer.start()
+
+    def _on_slider_pressed(self) -> None:
+        self._slider_down = True
+        self._commit_timer.stop()
+
+    def _on_slider_released(self) -> None:
+        self._slider_down = False
+        self._commit_pending()
+
+    def _commit_pending(self) -> None:
+        self._commit_timer.stop()
+        if self._pending is None:
+            return
+        before, self._pending = self._pending, None
+        self._record_if_changed(before)
+
+    def _record_if_changed(self, before: tuple) -> None:
+        if self._snap_equal(before, self._snapshot()):
+            return
+        self._undo_stack.append(before)
+        if len(self._undo_stack) > _UNDO_LIMIT:
+            del self._undo_stack[0]
+        self._redo_stack.clear()
+        self._update_undo_buttons()
+
+    def _update_undo_buttons(self) -> None:
+        self.btn_undo.setEnabled(bool(self._undo_stack) or self._pending is not None)
+        self.btn_redo.setEnabled(bool(self._redo_stack))
+
+    def _on_undo(self) -> None:
+        if self._slider_down:
+            return  # don't yank the value from under an active drag
+        self._commit_pending()
+        if not self._undo_stack:
+            return
+        self._redo_stack.append(self._snapshot())
+        self._restore(self._undo_stack.pop())
+        self._update_undo_buttons()
+
+    def _on_redo(self) -> None:
+        if self._slider_down:
+            return
+        self._commit_pending()
+        if not self._redo_stack:
+            return
+        self._undo_stack.append(self._snapshot())
+        self._restore(self._redo_stack.pop())
+        self._update_undo_buttons()
+
+    # ------------------------------------------------------------------
+    # Save parameters to prefix_NNNN.json
+    # ------------------------------------------------------------------
+
+    def _next_save_path(self, prefix: str, directory: str) -> pathlib.Path:
+        """List *directory*, then return prefix_NNNN.json for the first
+        unoccupied number."""
+        pattern = re.compile(rf"^{re.escape(prefix)}_(\d{{4}})\.json$")
+        used = set()
+        for fname in os.listdir(directory):
+            m = pattern.match(fname)
+            if m:
+                used.add(int(m.group(1)))
+        n = _SAVE_FIRST_INDEX
+        while n in used:
+            n += 1
+        return pathlib.Path(directory) / f"{prefix}_{n:04d}.json"
+
+    def _on_save(self) -> None:
+        prefix = re.sub(r'[\\/:*?"<>|]', "_", self.save_prefix_edit.text().strip())
+        if not prefix:
+            self._set_log_text("Save failed: prefix is empty")
+            return
+        directory = os.getcwd()
+        data = {
+            "format": "gnm_params",
+            "identity": self.identity.tolist(),
+            "expression": self.expression.tolist(),
+            "rotations": self.rotations.tolist(),
+            "translation": self.translation.tolist(),
+        }
+        try:
+            for _ in range(100):
+                path = self._next_save_path(prefix, directory)
+                try:
+                    # "x" = never overwrite; retry with a fresh listing if the
+                    # slot got taken between listing and writing.
+                    with open(path, "x", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+                except FileExistsError:
+                    continue
+                self._set_log_text(f"Saved parameters to {path}")
+                return
+            raise RuntimeError("could not find a free file number")
+        except Exception as e:
+            traceback.print_exc()
+            self._set_log_text(f"Save failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Load parameters from JSON
+    # ------------------------------------------------------------------
+
+    def _on_load(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load GNM parameters", os.getcwd(),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            expected = {
+                "identity": (model.identity_dim,),
+                "expression": (model.expression_dim,),
+                "rotations": (model.num_joints, 3),
+                "translation": (3,),
+            }
+            loaded = {}
+            for key, shape in expected.items():
+                if key not in data:
+                    raise ValueError(f"missing key '{key}'")
+                arr = np.asarray(data[key], dtype=np.float32)
+                if arr.shape != shape:
+                    raise ValueError(
+                        f"'{key}' has shape {arr.shape}, expected {shape}"
+                    )
+                if not np.isfinite(arr).all():
+                    raise ValueError(f"'{key}' contains NaN/inf")
+                loaded[key] = arr
+        except Exception as e:
+            traceback.print_exc()
+            self._set_log_text(f"Load failed: {e}")
+            return
+
+        # Nothing is modified above unless the whole file validated. Applying
+        # it is one undoable step.
+        self._commit_pending()
+        before = self._snapshot()
+        self.identity[:] = loaded["identity"]
+        self.expression[:] = loaded["expression"]
+        self.rotations[:] = loaded["rotations"]
+        self.translation[:] = loaded["translation"]
+        self._sync_all_sliders()
+        self._mark_dirty()
+        self._record_if_changed(before)
+        self._set_log_text(f"Loaded parameters from {path}")
 
     # ------------------------------------------------------------------
     # Buttons
@@ -949,6 +1208,7 @@ class GNMHeadViewerWindow(QMainWindow):
         self.viewport.wireframe = checked
         self.viewport.update()
 
+    @_undoable
     def _on_reset_params(self) -> None:
         self.identity[:] = 0
         self.expression[:] = 0
@@ -957,12 +1217,19 @@ class GNMHeadViewerWindow(QMainWindow):
         self._sync_all_sliders()
         self._mark_dirty()
 
+    @_undoable
     def _on_randomize(self) -> None:
         self.identity[:] = (np.random.randn(model.identity_dim) * 0.8).astype(np.float32)
         self._sync_identity_sliders()
         self._mark_dirty()
 
     def _on_preview_facs(self, name: str) -> None:
+        self._commit_pending()
+        before = self._snapshot()
+        self._apply_preview_facs(name)
+        self._record_if_changed(before)
+
+    def _apply_preview_facs(self, name: str) -> None:
         expr, rots, trans = model.facs_to_full_params(name, 1.0)
         self.expression[:] = 0
         self.rotations[:] = 0
@@ -975,6 +1242,7 @@ class GNMHeadViewerWindow(QMainWindow):
         self._sync_translation_sliders()
         self._mark_dirty()
 
+    @_undoable
     def _on_reset_to_neutral(self) -> None:
         self.expression[:] = 0
         self.rotations[:] = 0
