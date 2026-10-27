@@ -590,6 +590,10 @@ class GNMHeadViewerWindow(QMainWindow):
         self.expression = np.zeros(model.expression_dim, dtype=np.float32)
         self.rotations = np.zeros((model.num_joints, 3), dtype=np.float32)
         self.translation = np.zeros(3, dtype=np.float32)
+        # Optional per-vertex template offset D (V,3), e.g. from fit_head.py: loaded from
+        # a JSON's "template_offset" (.npy path) and kept fixed under the sliders.
+        self.template_offset: np.ndarray | None = None
+        self._offset_path: str | None = None
 
         self._dirty = True
         self._last_verts = model.template_verts
@@ -814,6 +818,14 @@ class GNMHeadViewerWindow(QMainWindow):
         btn_load.clicked.connect(self._on_load)
         row.addWidget(btn_load)
         lay.addLayout(row)
+        off_row = QHBoxLayout()
+        self._lbl_offset = QLabel()
+        off_row.addWidget(self._lbl_offset, stretch=1)
+        self.btn_clear_offset = QPushButton("Clear offset")
+        self.btn_clear_offset.clicked.connect(self._on_clear_offset)
+        off_row.addWidget(self.btn_clear_offset)
+        lay.addLayout(off_row)
+        self._refresh_offset_label()
         return box
 
     def _build_export_box(self) -> QWidget:
@@ -1012,17 +1024,20 @@ class GNMHeadViewerWindow(QMainWindow):
         return (
             self.identity.copy(), self.expression.copy(),
             self.rotations.copy(), self.translation.copy(),
+            (self.template_offset, self._offset_path),  # never mutated in place
         )
 
     @staticmethod
     def _snap_equal(a: tuple, b: tuple) -> bool:
-        return all(np.array_equal(x, y) for x, y in zip(a, b))
+        return (all(np.array_equal(x, y) for x, y in zip(a[:4], b[:4]))
+                and a[4][0] is b[4][0])
 
     def _restore(self, snap: tuple) -> None:
         self.identity[:] = snap[0]
         self.expression[:] = snap[1]
         self.rotations[:] = snap[2]
         self.translation[:] = snap[3]
+        self._set_offset(*snap[4])
         self._sync_all_sliders()
         self._mark_dirty()
 
@@ -1114,6 +1129,8 @@ class GNMHeadViewerWindow(QMainWindow):
             "rotations": self.rotations.tolist(),
             "translation": self.translation.tolist(),
         }
+        if self._offset_path is not None:
+            data["template_offset"] = self._offset_path
         try:
             for _ in range(100):
                 path = self._next_save_path(prefix, directory)
@@ -1140,8 +1157,13 @@ class GNMHeadViewerWindow(QMainWindow):
             self, "Load GNM parameters", os.getcwd(),
             "JSON files (*.json);;All files (*)",
         )
-        if not path:
-            return
+        if path:
+            self.load_params(path)
+
+    def load_params(self, path: str) -> bool:
+        """Load a gnm_params JSON. An optional "template_offset" key names a float32
+        (V,3) .npy (relative to the JSON) added to the template, as written by
+        fit_head.py; without it any active offset is cleared."""
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -1163,10 +1185,22 @@ class GNMHeadViewerWindow(QMainWindow):
                 if not np.isfinite(arr).all():
                     raise ValueError(f"'{key}' contains NaN/inf")
                 loaded[key] = arr
+            offset, offset_path = None, None
+            if data.get("template_offset") is not None:
+                offset_path = os.path.join(
+                    os.path.dirname(os.path.abspath(path)), data["template_offset"])
+                offset = np.load(offset_path).astype(np.float32)
+                shape = model.template_verts.shape
+                if offset.shape != shape:
+                    raise ValueError(
+                        f"template_offset has shape {offset.shape}, expected {shape}")
+                if not np.isfinite(offset).all():
+                    raise ValueError("template_offset contains NaN/inf")
+                offset_path = os.path.abspath(offset_path)
         except Exception as e:
             traceback.print_exc()
             self._set_log_text(f"Load failed: {e}")
-            return
+            return False
 
         # Nothing is modified above unless the whole file validated. Applying
         # it is one undoable step.
@@ -1176,10 +1210,35 @@ class GNMHeadViewerWindow(QMainWindow):
         self.expression[:] = loaded["expression"]
         self.rotations[:] = loaded["rotations"]
         self.translation[:] = loaded["translation"]
+        self._set_offset(offset, offset_path)
         self._sync_all_sliders()
         self._mark_dirty()
         self._record_if_changed(before)
-        self._set_log_text(f"Loaded parameters from {path}")
+        self._set_log_text(f"Loaded parameters from {path}"
+                           + (f"\nTemplate offset {offset_path}" if offset_path else ""))
+        return True
+
+    def _set_offset(self, offset: np.ndarray | None, path: str | None) -> None:
+        self.template_offset = offset
+        self._offset_path = path if offset is not None else None
+        self._refresh_offset_label()
+        self._mark_dirty()
+
+    def _refresh_offset_label(self) -> None:
+        if self.template_offset is None:
+            self._lbl_offset.setText("Template offset: none")
+        else:
+            mm = 1000.0 * float(np.linalg.norm(self.template_offset, axis=1).max())
+            self._lbl_offset.setText(
+                "<span style='color:#e0a030'><b>Template offset ACTIVE</b></span> "
+                f"({os.path.basename(self._offset_path)}, max {mm:.1f} mm)")
+            self._lbl_offset.setToolTip(self._offset_path)
+        self._lbl_offset.setTextFormat(Qt.TextFormat.RichText)
+        self.btn_clear_offset.setEnabled(self.template_offset is not None)
+
+    @_undoable
+    def _on_clear_offset(self) -> None:
+        self._set_offset(None, None)
 
     # ------------------------------------------------------------------
     # Buttons
@@ -1256,7 +1315,7 @@ class GNMHeadViewerWindow(QMainWindow):
         try:
             base_v = model.gen_verts(
                 self.identity, np.zeros(model.expression_dim, dtype=np.float32),
-                self.rotations, self.translation,
+                self.rotations, self.translation, self.template_offset,
             )
             facs_full = [model.facs_to_full_params(name, 1.0) for name in model.ALL_FACS]
             out_gltf, out_bin = model.build_gltf_with_quads_and_facs(
@@ -1265,6 +1324,7 @@ class GNMHeadViewerWindow(QMainWindow):
                 facs_names=model.ALL_FACS, facs_full_params=facs_full,
                 identity=self.identity, rotations=self.rotations,
                 translation=self.translation, out_path=self.gltf_path_edit.text(),
+                template_offset=self.template_offset,
             )
             self._set_log_text(
                 f"Exported glTF {out_gltf}\nBin {out_bin}\n"
@@ -1278,14 +1338,14 @@ class GNMHeadViewerWindow(QMainWindow):
         try:
             base_v = model.gen_verts(
                 self.identity, np.zeros(model.expression_dim, dtype=np.float32),
-                self.rotations, self.translation,
+                self.rotations, self.translation, self.template_offset,
             )
             out_gltf, out_bin = model.build_gltf_with_quads_and_facs(
                 base_verts=base_v, base_tris=model.triangles, base_quads=model.quads,
                 quad_uvs_arr=model.quad_uvs, tri_uvs_arr=model.tri_uvs,
                 facs_names=[], facs_exprs=[], identity=self.identity,
                 rotations=self.rotations, translation=self.translation,
-                out_path=self.gltf_path_edit.text(),
+                out_path=self.gltf_path_edit.text(), template_offset=self.template_offset,
             )
             self._set_log_text(f"Exported BASE glTF {out_gltf}\nBin {out_bin}")
         except Exception as e:
@@ -1330,7 +1390,8 @@ class GNMHeadViewerWindow(QMainWindow):
         if self._dirty:
             try:
                 verts = model.gen_verts(
-                    self.identity, self.expression, self.rotations, self.translation
+                    self.identity, self.expression, self.rotations, self.translation,
+                    self.template_offset,
                 )
                 self._last_verts = verts
                 self.viewport.set_verts(verts)
@@ -1395,7 +1456,8 @@ class GNMHeadViewerWindow(QMainWindow):
         view = cam.view()
         proj = cam.proj(aspect)
         model_mat = np.eye(4, dtype=np.float32)
-        v = model.gen_verts(self.identity, self.expression, self.rotations, self.translation)
+        v = model.gen_verts(self.identity, self.expression, self.rotations, self.translation,
+                            self.template_offset)
         text, frustum = model.log_debug_info(cam, v, model_mat, view, proj, log_file=self._log_file)
         self._set_log_text(text)
         return text, frustum

@@ -28,6 +28,7 @@ import math
 import pathlib
 import datetime
 import json
+import struct
 import traceback
 
 import numpy as np
@@ -164,8 +165,19 @@ def compute_normals(verts, faces):
     normals /= (np.linalg.norm(normals, axis=1, keepdims=True)+1e-8)
     return normals
 
-def gen_verts(identity, expression, rotations, translation):
-    v = gnm(np.array(identity,dtype=np.float32), np.array(expression,dtype=np.float32), np.array(rotations,dtype=np.float32).reshape(num_joints,3), np.array(translation,dtype=np.float32)).astype(np.float32)
+def gen_verts(identity, expression, rotations, translation, template_offset=None):
+    """GNM vertices. ``template_offset`` (V,3) optionally adds a per-vertex offset D to the
+    template; the template joints then move by ``joint_regressor @ D`` (same steps as
+    ``gnm.__call__``, so LBS and pose correctives see the offset head)."""
+    args = (np.array(identity,dtype=np.float32), np.array(expression,dtype=np.float32), np.array(rotations,dtype=np.float32).reshape(num_joints,3), np.array(translation,dtype=np.float32))
+    if template_offset is None or not GNM_OK:
+        v = gnm(*args).astype(np.float32)
+    else:
+        ident, expr, rots, trans = args
+        D = np.asarray(template_offset, dtype=gnm.template_vertex_positions.dtype)
+        vb = gnm.vertex_positions_bind_pose(ident, expr) + D + gnm.compute_pose_correctives(rots)
+        joints = gnm.joint_positions_bind_pose(ident) + gnm.joint_regressor @ D
+        v = gnm.vertex_positions_world(vb, joints, rots, trans).astype(np.float32)
     if np.isnan(v).any():
         print("[ERROR] NaN in verts!")
         return template_verts
@@ -484,7 +496,18 @@ def facs_to_full_params(name, intensity=1.0):
 
     return expr.astype(np.float32), rots.astype(np.float32), trans.astype(np.float32)
 
-def build_gltf_with_quads_and_facs(base_verts, base_tris, base_quads, quad_uvs_arr, tri_uvs_arr, facs_names, facs_exprs=None, facs_full_params=None, identity=None, rotations=None, translation=None, out_path=None):
+def write_glb(path, gltf, bin_data):
+    """Write a glTF dict + its single binary buffer as a .glb (JSON and BIN chunks, 4-byte padded)."""
+    js = json.dumps(gltf, separators=(',', ':')).encode('utf-8')
+    js += b' ' * (-len(js) % 4)
+    bin_data = bin_data + b'\0' * (-len(bin_data) % 4)
+    total = 12 + 8 + len(js) + 8 + len(bin_data)
+    with open(path, 'wb') as f:
+        f.write(struct.pack('<III', 0x46546C67, 2, total))
+        f.write(struct.pack('<II', len(js), 0x4E4F534A)); f.write(js)
+        f.write(struct.pack('<II', len(bin_data), 0x004E4942)); f.write(bin_data)
+
+def build_gltf_with_quads_and_facs(base_verts, base_tris, base_quads, quad_uvs_arr, tri_uvs_arr, facs_names, facs_exprs=None, facs_full_params=None, identity=None, rotations=None, translation=None, out_path=None, template_offset=None):
     # Support both old (facs_exprs) and new (facs_full_params) calling conventions
     # facs_full_params is list of (expr, rots, trans) - CORRECT for jaw/eyes/head pose
     if facs_exprs is None and facs_full_params is None:
@@ -599,10 +622,10 @@ def build_gltf_with_quads_and_facs(base_verts, base_tris, base_quads, quad_uvs_a
             # base rotations/translation are from current identity/pose, plus blendshape offset
             combined_rots = rotations + rots_delta if rotations is not None else rots_delta
             combined_trans = translation + trans_delta if translation is not None else trans_delta
-            v_target = gen_verts(identity, expr, combined_rots, combined_trans)
+            v_target = gen_verts(identity, expr, combined_rots, combined_trans, template_offset)
         else:
             expr = facs_exprs[idx] if facs_exprs is not None else facs_to_expr(facs_name, 1.0)
-            v_target = gen_verts(identity, expr, rotations, translation)
+            v_target = gen_verts(identity, expr, rotations, translation, template_offset)
         n_target = compute_normals(v_target, final_tris)
 
         # For each new vertex, get its old_idx, then delta = target[old_idx] - base[old_idx]
@@ -645,9 +668,12 @@ def build_gltf_with_quads_and_facs(base_verts, base_tris, base_quads, quad_uvs_a
         bin_chunks.append(mn.tobytes())
 
     full_bin = b''.join(bin_chunks)
-    bin_path = pathlib.Path(out_path).with_suffix('.bin')
-    with open(bin_path, 'wb') as f:
-        f.write(full_bin)
+    # out_path *.glb -> one binary glTF (buffer embedded); otherwise .gltf + external .bin
+    as_glb = pathlib.Path(out_path).suffix.lower() == '.glb'
+    bin_path = None if as_glb else pathlib.Path(out_path).with_suffix('.bin')
+    if bin_path is not None:
+        with open(bin_path, 'wb') as f:
+            f.write(full_bin)
 
 
     # BufferViews and Accessors
@@ -708,7 +734,7 @@ def build_gltf_with_quads_and_facs(base_verts, base_tris, base_quads, quad_uvs_a
             "weights": [0.0] * len(facs_names),
             "extras": {"targetNames": facs_names}
         }],
-        "buffers": [{"uri": bin_path.name, "byteLength": len(full_bin)}],
+        "buffers": [{"byteLength": len(full_bin)} if as_glb else {"uri": bin_path.name, "byteLength": len(full_bin)}],
         "bufferViews": bufferViews,
         "accessors": accessors,
     }
@@ -741,10 +767,13 @@ def build_gltf_with_quads_and_facs(base_verts, base_tris, base_quads, quad_uvs_a
     for i in range(len(facs_names)):
         prim["targets"].append({"POSITION": morph_acc_pos[i], "NORMAL": morph_acc_norm[i]})
 
-    with open(out_path, 'w') as f:
-        json.dump(gltf, f, indent=2)
+    if as_glb:
+        write_glb(out_path, gltf, full_bin)
+    else:
+        with open(out_path, 'w') as f:
+            json.dump(gltf, f, indent=2)
 
-    print(f"[glTF] Wrote {out_path} + {bin_path}")
+    print(f"[glTF] Wrote {out_path}" + (f" + {bin_path}" if bin_path is not None else ""))
     print(f"[glTF] Verts {new_positions.shape[0]} (shared, not disjoined), Tris {indices.shape[0]//3}, Blend shapes {len(facs_names)}")
     print(f"[glTF] Total bin {len(full_bin)/1024/1024:.2f} MB")
     return out_path, bin_path

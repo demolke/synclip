@@ -9,3 +9,8 @@ PyOpenGL>=3.1
 pytest>=7.0
 trimesh
 etils
+scipy>=1.10
+Pillow>=10.0
+rtree  # trimesh closest-point / ray queries (headfit)
+# optional: fast ray casting for headfit rendering (falls back to rtree/trimesh)
+embreex; python_version < "3.14"
