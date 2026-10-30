@@ -6,7 +6,10 @@
 #   - The Godot and Blender cross-implementation harnesses run automatically iff
 #     those binaries are on PATH; otherwise pytest skips them with a notice.
 #
-# Usage:  tools/run_tests.sh [extra pytest args]
+# Usage:  ./run_tests.sh [extra pytest args]
+#
+# Everything runs by default, including the slow end-to-end tests (marked
+# "slow", ~3 min). Fast loop without them:   ./run_tests.sh -m "not slow"
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,4 +32,4 @@ else
     echo "[run_tests] Blender not found (set BLENDER) - addon harness will be skipped."
 fi
 
-exec python -m pytest synclip/tests/ "$@"
+exec python -m pytest synclip/tests/ capmo/tests/ "$@"

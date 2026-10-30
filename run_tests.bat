@@ -8,10 +8,11 @@ REM     binaries are available. Point at them with the GODOT and BLENDER
 REM     environment variables, e.g.:
 REM         set GODOT=C:\tools\Godot.exe
 REM         set BLENDER=C:\Program Files\Blender Foundation\Blender 5.1\blender.exe
-REM         tools\run_tests.bat
+REM         run_tests.bat
 REM     If unset, the harnesses fall back to PATH, and skip if not found.
 REM
-REM Usage:  tools\run_tests.bat [extra pytest args]
+REM Usage:  run_tests.bat [extra pytest args]
+REM Fast loop (skip the slow end-to-end tests):  run_tests.bat -m "not slow"
 setlocal
 
 set "HERE=%~dp0"
@@ -42,5 +43,5 @@ if defined BLENDER (
     )
 )
 
-python -m pytest synclip\tests\ %*
+python -m pytest synclip\tests\ capmo\tests\ %*
 endlocal

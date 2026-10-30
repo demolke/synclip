@@ -1,0 +1,15 @@
+# capmo additional dependencies (on top of synclip's shared stack:
+# PySide6, numpy, opencv-contrib-python (its aruco module drives ChArUco
+# calibration), mediapipe).
+#
+#   pip install -r capmo/requirements.txt
+
+# Live + offline H.264 decode of the phone streams (FFmpeg-backed).
+av>=11
+
+# Self-calibration bundle adjustment + track cleanup
+# (capmo.selfcal / capmo.motion / capmo.tools.reconstruct_take).
+scipy>=1.10
+# Optional: the 3D validation plot of capmo.tools.reconstruct_take (skipped with a
+# message when missing; --no-render skips all validation images).
+# matplotlib>=3.7
