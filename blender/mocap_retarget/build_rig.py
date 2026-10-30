@@ -414,7 +414,7 @@ def main(argv):
                    help="proxy thickness: torso=1.2,head=1.3,neck=1,arm=1.1,leg=1.2,hand=1,foot=1")
     p.add_argument("--palette", default=None, choices=sorted(PALETTES))
     p.add_argument("--keep-face", action="store_true")
-    a = p.parse_args([])
+    a = p.parse_args(argv)
     seg = {sgm: getattr(a, "seg_" + sgm) for sgm in SEGMENTS if getattr(a, "seg_" + sgm) is not None}
     kw = preset_kwargs(a.preset, height=a.height, seg=seg, shoulder_width=a.shoulder_width,
                        hip_width=a.hip_width, girth=a.girth, palette=a.palette)

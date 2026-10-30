@@ -229,3 +229,131 @@ tests are marked `slow` (~2 min of the ~3 min total); for a fast loop use
 - synclip is the **server** broadcasting to viewers; capmo is the **server**
   receiving from phones — the framed-socket transport is the shared bit, the
   direction/role differs.
+
+## Headless batch processing of video files
+
+Process many multi-camera takes without the Qt UI. All steps are CLI and
+idempotent; the same commands run on a server or CI.
+
+### Prerequisites
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install numpy av opencv-contrib-python mediapipe
+# Linux: sudo apt install libgles2
+```
+
+The first run downloads the MediaPipe PoseLandmarker model automatically.
+
+### Directory layout
+
+```
+work/
+  takes/
+    take01/
+      camA.mp4 camB.mp4 camC.mp4 camD.mp4
+    take02/
+      ...
+  kp/          # keypoints output
+  mocap/       # reconstructed joints3d + rig.json
+```
+
+Keep the same camera order and `--cam-ids` for every take.
+
+### 1. Extract 2D keypoints per take
+
+Board segment (first 0-20 s, if a ChArUco board was shown):
+
+```bash
+for d in work/takes/*; do
+  name=$(basename "$d")
+  python -m capmo.tools.extract_keypoints \
+    --calib --start 0 --end 20 --calib-every 1 \
+    --squares-x 7 --squares-y 5 --square-len 0.10 --marker-len 0.075 \
+    --out work/kp --take "$name" \
+    --cam-ids camA,camB,camC,camD \
+    "$d"/*.mp4
+done
+```
+
+Body keypoints for the performance:
+
+```bash
+for d in work/takes/*; do
+  name=$(basename "$d")
+  python -m capmo.tools.extract_keypoints \
+    --start 20 --out work/kp --take "$name" --model heavy \
+    --cam-ids camA,camB,camC,camD --keyframes 6 --proxy \
+    "$d"/*.mp4
+done
+```
+
+Options:
+* `--model lite|full|heavy` – speed/accuracy trade-off, `heavy` recommended
+* `--every N` – process every N-th frame
+* `--max-height 1080` – downscale before MediaPipe
+* `--proxy` – write 480p preview MP4s
+
+For a capmo session directory replace the MP4 list with the session path; the
+cameras are taken from `manifest.json`.
+
+### 2. Calibrate cameras from the board
+
+```bash
+for take in work/takes/*/; do
+  name=$(basename "$take")
+  python -m capmo.tools.calibrate_board work/kp/"$name" \
+    --out work/kp/"$name"/rig.json \
+    --report work/kp/"$name"/rig_report.json \
+    --overlay-dir work/kp/"$name"/rig_check
+done
+```
+
+Check `rig_report.json`:
+* Intrinsic RMS < 0.5 px, BA RMS < 1 px
+* `coverage` > 0.5, `tilt_deg.max` 20-45°
+* `graph.not_connected` empty
+
+If no board was used, skip this step – `reconstruct_take` will self-calibrate.
+
+### 3. Reconstruct 3D joints
+
+With board calibration:
+
+```bash
+for take in work/takes/*/; do
+  name=$(basename "$take")
+  python -m capmo.tools.reconstruct_take work/kp/"$name" \
+    --out work/mocap --rig work/kp/"$name"/rig.json \
+    --start 20
+done
+```
+
+Self-calibration fallback (no board):
+
+```bash
+python -m capmo.tools.reconstruct_take work/kp/take01 --out work/mocap
+```
+
+Outputs per take in `work/mocap/`:
+* `<take>_joints3d.npz` – T×33×3 metres, Z up, floor at z=0
+* `<take>_joints3d_raw.npz`
+* `rig.json`, `report.json`, `validation/`
+
+### 4. Batch retarget to Blender (optional)
+
+See `blender/mocap_retarget/README.md` §5a. Example:
+
+```bash
+MR=/home/llama/synclip/blender/mocap_retarget
+BPY=/opt/blender/blender -b --factory-startup --python
+for take in work/mocap/*_joints3d.npz; do
+  base=$(basename "$take" _joints3d.npz)
+  $BPY $MR/build_rig.py -- --out work/rig/${base}_rig.blend --height 1.75 --leg-scale 1.08 --arm-scale 0.95
+  $BPY $MR/retarget.py -- --blend work/rig/${base}_rig.blend --npz "$take" --out work/rig/${base}_retargeted.blend
+done
+```
+
+All steps are headless, repeatable and can be wrapped in a Makefile or CI job.
+Logs and JSON reports are written per take for inspection.
